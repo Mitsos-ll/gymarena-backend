@@ -1,0 +1,24 @@
+# Dart
+**/.dart_tool
+**/.packages
+**/build
+
+# Env / secrets
+**/.env
+**/*.env.local
+
+# SQLite data
+**/data
+**/*.db
+**/*.db-shm
+**/*.db-wal
+
+# IDE
+**/.idea
+**/.vscode
+**/*.iml
+
+# OS
+**/.DS_Store
+**/Thumbs.db
+fly.toml

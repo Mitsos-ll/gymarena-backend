@@ -1,5 +1,5 @@
 # ── Stage 1 : build ──────────────────────────────────────────────────────────
-FROM dart:stable AS builder
+FROM --platform=linux/amd64 dart:stable AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ COPY . .
 RUN dart compile exe bin/server.dart -o bin/server
 
 # ── Stage 2 : image minimale ──────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM --platform=linux/amd64 debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

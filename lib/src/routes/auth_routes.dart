@@ -1,0 +1,110 @@
+import 'package:shelf/shelf.dart';
+
+import '../middleware/rate_limit_middleware.dart';
+import '../repositories/user_repository.dart';
+import '../services/google_token_service.dart';
+import '../utils/api_exception.dart';
+import '../utils/http_json.dart';
+import '../utils/validator.dart';
+
+class AuthRoutes {
+  AuthRoutes({
+    required GoogleTokenService googleTokenService,
+    required UserRepository userRepository,
+    required RateLimiter authLimiter,
+  })  : _googleTokenService = googleTokenService,
+        _userRepository = userRepository,
+        _authLimiter = authLimiter;
+
+  final GoogleTokenService _googleTokenService;
+  final UserRepository _userRepository;
+  final RateLimiter _authLimiter;
+
+  Future<Response> signInGoogle(Request request) async {
+    try {
+      _enforceAuthLimit(request);
+      final body = await readJsonBody(request);
+      final idToken = validateIdToken(body['idToken']?.toString());
+
+      final google = await _googleTokenService.verifyIdToken(idToken);
+      final session = _userRepository.signInWithGoogle(google);
+      return jsonResponse(session.toJson());
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> register(Request request) async {
+    try {
+      _enforceAuthLimit(request);
+      final body = await readJsonBody(request);
+      final email = validateEmail(body['email']?.toString());
+      final password = validatePassword(body['password']?.toString());
+      final displayName =
+          validateDisplayName(body['displayName']?.toString(), required: false);
+
+      final session = _userRepository.registerWithGymTrack(
+        email: email,
+        password: password,
+        displayName: displayName,
+      );
+      return jsonResponse(session.toJson());
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> login(Request request) async {
+    try {
+      _enforceAuthLimit(request);
+      final body = await readJsonBody(request);
+      final email = validateEmail(body['email']?.toString());
+      // Login: skip complexity check — user may have an old password
+      final password =
+          validatePassword(body['password']?.toString(), skipComplexity: true);
+
+      final session = _userRepository.signInWithGymTrack(
+        email: email,
+        password: password,
+      );
+      return jsonResponse(session.toJson());
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> refresh(Request request) async {
+    try {
+      _enforceAuthLimit(request);
+      final body = await readJsonBody(request);
+      final refreshToken = validateRefreshToken(body['refreshToken']?.toString());
+
+      final session = _userRepository.refreshSession(refreshToken);
+      return jsonResponse(session.toJson());
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> logout(Request request) async {
+    try {
+      final bearer = bearerToken(request);
+      if (bearer != null && bearer.isNotEmpty) {
+        _userRepository.logoutByBearerToken(bearer);
+      }
+      return jsonResponse({'ok': true});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  void _enforceAuthLimit(Request request) {
+    final ip = request.headers['x-forwarded-for']?.split(',').first.trim() ??
+        request.headers['x-real-ip'] ??
+        'unknown';
+    if (!_authLimiter.allow(ip)) {
+      throw ApiException('Too many auth attempts. Please slow down.',
+          statusCode: 429);
+    }
+  }
+}

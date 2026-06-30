@@ -1,7 +1,6 @@
 import 'package:shelf/shelf.dart';
-import 'package:shelf_router/shelf_router.dart';
-
 import '../db/app_database.dart';
+import '../utils/api_exception.dart';
 import '../utils/http_json.dart';
 
 class AdminRoutes {
@@ -44,6 +43,10 @@ class AdminRoutes {
       "SELECT COUNT(*) as c FROM auth_sessions WHERE revoked_at IS NULL AND refresh_expires_at > datetime('now')",
     ).first['c'] as int?) ?? 0;
 
+    final totalCoaches = (db.select(
+      'SELECT COUNT(*) as c FROM user_profiles WHERE is_coach = 1',
+    ).first['c'] as int?) ?? 0;
+
     return jsonResponse({
       'generated_at': DateTime.now().toUtc().toIso8601String(),
       'users': {
@@ -56,6 +59,167 @@ class AdminRoutes {
       'sessions': {
         'active': activeSessions,
       },
+      'coaches': {
+        'total': totalCoaches,
+      },
     });
+  }
+
+  Response listUserWorkouts(Request request, String userId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    final workouts = db.select(
+      'SELECT id, workout_date, duration_seconds, notes FROM workouts WHERE user_id=? ORDER BY workout_date DESC',
+      [userId],
+    );
+    final result = workouts.map((w) {
+      final weRows = db.select('SELECT COUNT(*) as c FROM workout_exercises WHERE workout_id=?', [w['id']]);
+      return {
+        'id': w['id'],
+        'date': w['workout_date'],
+        'durationSeconds': w['duration_seconds'],
+        'notes': w['notes'],
+        'exerciseCount': weRows.first['c'],
+      };
+    }).toList();
+    return jsonResponse({'userId': userId, 'workouts': result, 'total': result.length});
+  }
+
+  Response deleteUserWorkout(Request request, String userId, String workoutId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    db.execute('DELETE FROM workouts WHERE id=? AND user_id=?', [workoutId, userId]);
+    return jsonResponse({'deleted': workoutId});
+  }
+
+  Response deleteAllUserWorkouts(Request request, String userId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    db.execute('DELETE FROM workouts WHERE user_id=?', [userId]);
+    return jsonResponse({'deleted': true, 'userId': userId});
+  }
+
+  Response listUserPrograms(Request request, String userId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    final rows = db.select(
+      'SELECT id, name, created_at FROM programs WHERE user_id=? ORDER BY name',
+      [userId],
+    );
+    return jsonResponse({'userId': userId, 'programs': rows.map((r) => {'id': r['id'], 'name': r['name'], 'created_at': r['created_at']}).toList(), 'total': rows.length});
+  }
+
+  Response deleteAllUserPrograms(Request request, String userId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    db.execute('DELETE FROM programs WHERE user_id=?', [userId]);
+    return jsonResponse({'deleted': true, 'userId': userId});
+  }
+
+  Response debugUserSync(Request request, String userId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    final profile = db.select(
+      'SELECT user_id, weight_kg, height_cm, fitness_goal, updated_at FROM user_profiles WHERE user_id=?',
+      [userId],
+    );
+    final exercises = db.select(
+      'SELECT id, local_id, name, muscle_group_name, created_at FROM exercises WHERE user_id=? ORDER BY created_at DESC',
+      [userId],
+    );
+    final measurements = db.select(
+      'SELECT id, local_id, measurement_type, value_cm, created_at FROM body_measurements WHERE user_id=? ORDER BY created_at DESC',
+      [userId],
+    );
+    final weights = db.select(
+      'SELECT id, local_id, weight_kg, created_at FROM weight_history WHERE user_id=? ORDER BY created_at DESC',
+      [userId],
+    );
+    return jsonResponse({
+      'userId': userId,
+      'profile': profile.map((r) => {
+        'weightKg': r['weight_kg'],
+        'heightCm': r['height_cm'],
+        'fitnessGoal': r['fitness_goal'],
+        'updatedAt': r['updated_at'],
+      }).toList(),
+      'exercises': exercises.map((r) => {
+        'id': r['id'],
+        'localId': r['local_id'],
+        'name': r['name'],
+        'muscleGroupName': r['muscle_group_name'],
+        'createdAt': r['created_at'],
+      }).toList(),
+      'measurements': measurements.map((r) => {
+        'id': r['id'],
+        'localId': r['local_id'],
+        'measurementType': r['measurement_type'],
+        'valueCm': r['value_cm'],
+        'createdAt': r['created_at'],
+      }).toList(),
+      'weights': weights.map((r) => {
+        'id': r['id'],
+        'localId': r['local_id'],
+        'weightKg': r['weight_kg'],
+        'createdAt': r['created_at'],
+      }).toList(),
+    });
+  }
+
+  Response deleteAllUserExercises(Request request, String userId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    db.execute('DELETE FROM exercises WHERE user_id=?', [userId]);
+    return jsonResponse({'deleted': true, 'userId': userId});
+  }
+
+  Future<Response> setCoach(Request request, String userId) async {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401,
+          body: '{"message":"Unauthorized"}',
+          headers: {'Content-Type': 'application/json'});
+    }
+
+    try {
+      final body = await readJsonBody(request);
+      final isCoach = body['isCoach'] == true ? 1 : 0;
+      final now = dbNow();
+
+      final rows = database.raw.select('SELECT id FROM users WHERE id=? AND is_deleted=0 LIMIT 1', [userId]);
+      if (rows.isEmpty) {
+        return errorResponse('User not found.', statusCode: 404);
+      }
+
+      database.raw.execute(
+        'UPDATE user_profiles SET is_coach=?, updated_at=? WHERE user_id=?',
+        [isCoach, now, userId],
+      );
+
+      return jsonResponse({'userId': userId, 'isCoach': isCoach == 1, 'updatedAt': now});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
   }
 }

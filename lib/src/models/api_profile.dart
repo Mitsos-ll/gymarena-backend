@@ -10,6 +10,8 @@ class ApiProfile {
     this.heightCm,
     required this.sex,
     required this.onboardingCompleted,
+    this.isCoach = false,
+    this.fitnessGoal,
   });
 
   final String userId;
@@ -18,6 +20,8 @@ class ApiProfile {
   final double? heightCm;
   final UserSex sex;
   final bool onboardingCompleted;
+  final bool isCoach;
+  final String? fitnessGoal;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -29,6 +33,8 @@ class ApiProfile {
       'heightCm': heightCm,
       'sex': sex.name,
       'onboardingCompleted': onboardingCompleted,
+      'isCoach': isCoach,
+      'fitnessGoal': fitnessGoal,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
     };

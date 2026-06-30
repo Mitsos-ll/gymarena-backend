@@ -17,7 +17,7 @@ void main() {
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  Future<Response> post(String path, Map<String, dynamic> body) {
+  Future<Response> post(String path, Map<String, dynamic> body) async {
     return backend.handler(
       Request(
         'POST',

@@ -12,4 +12,5 @@ AppConfig testConfig() => AppConfig(
       rateLimitWindowSeconds: 60,
       authRateLimitMaxRequests: 1000,
       authRateLimitWindowSeconds: 60,
+      adminSecret: 'test-admin-secret',
     );

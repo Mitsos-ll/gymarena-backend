@@ -155,20 +155,35 @@ class UserRepository {
     final existingProfile = _findProfileByUserId(userId);
     if (existingProfile == null) {
       _database.raw.execute(
-        'INSERT INTO user_profiles (user_id, display_name, weight_kg, height_cm, sex, onboarding_completed, created_at, updated_at) '
-        'VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
-        [userId, input.displayName, input.weightKg, input.heightCm, input.sex.name, now, now],
+        'INSERT INTO user_profiles (user_id, display_name, weight_kg, height_cm, sex, fitness_goal, onboarding_completed, created_at, updated_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
+        [userId, input.displayName, input.weightKg, input.heightCm, input.sex.name, input.fitnessGoal, now, now],
       );
     } else {
       _database.raw.execute(
-        'UPDATE user_profiles SET display_name=?, weight_kg=?, height_cm=?, sex=?, onboarding_completed=1, updated_at=? WHERE user_id=?',
-        [input.displayName, input.weightKg, input.heightCm, input.sex.name, now, userId],
+        'UPDATE user_profiles SET display_name=?, weight_kg=?, height_cm=?, sex=?, fitness_goal=?, onboarding_completed=1, updated_at=? WHERE user_id=?',
+        [input.displayName, input.weightKg, input.heightCm, input.sex.name, input.fitnessGoal, now, userId],
       );
     }
 
     _database.raw.execute(
       'UPDATE users SET display_name=?, updated_at=?, last_login_at=? WHERE id=?',
       [input.displayName, now, now, userId],
+    );
+
+    return getSessionByAccessToken(accessToken);
+  }
+
+  ApiSession updateFitnessGoal(String accessToken, String? fitnessGoal) {
+    final sessionRow = _findActiveSessionByAccessToken(accessToken);
+    if (sessionRow == null) throw ApiException('Unauthorized.', statusCode: 401);
+
+    final userId = sessionRow['user_id'] as String;
+    final now = dbNow();
+
+    _database.raw.execute(
+      'UPDATE user_profiles SET fitness_goal=?, updated_at=? WHERE user_id=?',
+      [fitnessGoal, now, userId],
     );
 
     return getSessionByAccessToken(accessToken);
@@ -341,6 +356,8 @@ class UserRepository {
       heightCm: (row['height_cm'] as num?)?.toDouble(),
       sex: ApiProfile.sexFromDb(row['sex'] as String?),
       onboardingCompleted: (row['onboarding_completed'] as int? ?? 0) == 1,
+      isCoach: (row['is_coach'] as int? ?? 0) == 1,
+      fitnessGoal: row['fitness_goal'] as String?,
       createdAt: DateTime.parse(row['created_at'] as String),
       updatedAt: DateTime.parse(row['updated_at'] as String),
     );
@@ -395,10 +412,12 @@ class ApiProfileInput {
     required this.weightKg,
     required this.heightCm,
     required this.sex,
+    this.fitnessGoal,
   });
 
   final String displayName;
   final double? weightKg;
   final double? heightCm;
   final UserSex sex;
+  final String? fitnessGoal;
 }

@@ -12,7 +12,9 @@ import 'middleware/request_id_middleware.dart';
 import 'repositories/user_repository.dart';
 import 'routes/admin_routes.dart';
 import 'routes/auth_routes.dart';
+import 'routes/coach_routes.dart';
 import 'routes/me_routes.dart';
+import 'routes/sync_routes.dart';
 import 'services/google_token_service.dart';
 import 'services/session_service.dart';
 import 'utils/http_json.dart';
@@ -47,6 +49,8 @@ class GymTrackBackend {
     );
     meRoutes = MeRoutes(userRepository: userRepository);
     adminRoutes = AdminRoutes(database: database, adminSecret: config.adminSecret);
+    coachRoutes = CoachRoutes(userRepository: userRepository, database: database);
+    syncRoutes = SyncRoutes(userRepository: userRepository, database: database);
   }
 
   final AppConfig config;
@@ -59,6 +63,8 @@ class GymTrackBackend {
   late final AuthRoutes authRoutes;
   late final MeRoutes meRoutes;
   late final AdminRoutes adminRoutes;
+  late final CoachRoutes coachRoutes;
+  late final SyncRoutes syncRoutes;
 
   Handler get handler {
     final router = Router();
@@ -74,6 +80,56 @@ class GymTrackBackend {
 
     router.get('/me', meRoutes.getMe);
     router.put('/me/profile', meRoutes.upsertProfile);
+    router.put('/me/fitness-goal', meRoutes.updateFitnessGoal);
+
+    // ── Admin ──────────────────────────────────────────────────────────────
+    router.put('/admin/users/<userId>/set-coach', adminRoutes.setCoach);
+    router.get('/admin/users/<userId>/workouts', adminRoutes.listUserWorkouts);
+    router.delete('/admin/users/<userId>/workouts/<workoutId>', adminRoutes.deleteUserWorkout);
+    router.delete('/admin/users/<userId>/workouts', adminRoutes.deleteAllUserWorkouts);
+    router.get('/admin/users/<userId>/programs', adminRoutes.listUserPrograms);
+    router.delete('/admin/users/<userId>/programs', adminRoutes.deleteAllUserPrograms);
+    router.delete('/admin/users/<userId>/exercises', adminRoutes.deleteAllUserExercises);
+    router.get('/admin/users/<userId>/debug-sync', adminRoutes.debugUserSync);
+
+    // ── Coach ──────────────────────────────────────────────────────────────
+    router.post('/coach/invite-codes', coachRoutes.generateInviteCode);
+    router.post('/coach/invite-codes/redeem', coachRoutes.redeemCode);
+    router.get('/coach/athletes', coachRoutes.getAthletes);
+    router.delete('/coach/athletes/<athleteUserId>', coachRoutes.removeAthlete);
+    router.get('/coach/athletes/<athleteUserId>/detail', coachRoutes.getAthleteDetail);
+    router.put('/coach/athletes/<athleteUserId>/workouts/<workoutId>/note', coachRoutes.saveNote);
+    router.put('/coach/athletes/<athleteUserId>/program', coachRoutes.assignProgram);
+    router.delete('/coach/athletes/<athleteUserId>/program', coachRoutes.removeProgram);
+    router.put('/coach/public-profile', coachRoutes.upsertPublicProfile);
+    router.get('/coaches/public', coachRoutes.getPublicCoaches);
+    router.delete('/athlete/coach', coachRoutes.revokeCoach);
+
+    // ── Sync ───────────────────────────────────────────────────────────────
+    router.get('/me/snapshot', syncRoutes.getSnapshot);
+    router.post('/workouts/batch', syncRoutes.pushWorkoutBatch);
+    router.post('/workouts', syncRoutes.pushWorkout);
+    router.delete('/workouts/<workoutId>', syncRoutes.deleteWorkout);
+    router.post('/programs/batch', syncRoutes.pushProgramBatch);
+    router.post('/programs', syncRoutes.pushProgram);
+    router.delete('/programs/<programId>', syncRoutes.deleteProgram);
+    router.post('/session-templates/batch', syncRoutes.pushSessionTemplateBatch);
+    router.delete('/session-templates/<localId>', syncRoutes.deleteSessionTemplate);
+    router.post('/exercises/batch', syncRoutes.pushExerciseBatch);
+    router.post('/exercises', syncRoutes.pushExercise);
+    router.post('/weight-history/batch', syncRoutes.pushWeightBatch);
+    router.post('/body-measurements/batch', syncRoutes.pushMeasurementBatch);
+    router.put('/me/gamification', syncRoutes.pushGamification);
+    router.put('/me/community-profile', syncRoutes.pushCommunityProfile);
+    router.post('/community/shares/workout', syncRoutes.pushWorkoutShare);
+    router.delete('/community/shares/workout/<shareId>', syncRoutes.deleteWorkoutShare);
+    router.post('/community/shares/program', syncRoutes.pushProgramShare);
+    router.delete('/community/shares/program/<shareId>', syncRoutes.deleteProgramShare);
+    router.post('/community/relations', syncRoutes.pushRelation);
+    router.patch('/community/relations/<relationId>', syncRoutes.patchRelation);
+    router.delete('/community/relations/<relationId>', syncRoutes.deleteRelation);
+    router.get('/community/relations', syncRoutes.getRelations);
+    router.get('/community/friends/shares', syncRoutes.getFriendsShares);
 
     return const Pipeline()
         .addMiddleware(requestIdMiddleware())

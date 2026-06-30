@@ -1,5 +1,4 @@
 import 'package:shelf/shelf.dart';
-import 'package:shelf_router/shelf_router.dart';
 
 import '../models/api_profile.dart';
 import '../repositories/user_repository.dart';
@@ -11,13 +10,6 @@ class MeRoutes {
       : _userRepository = userRepository;
 
   final UserRepository _userRepository;
-
-  Router get router {
-    final router = Router();
-    router.get('', getMe);
-    router.put('/profile', upsertProfile);
-    return router;
-  }
 
   Future<Response> getMe(Request request) async {
     try {
@@ -51,6 +43,7 @@ class MeRoutes {
       final weightKg = _doubleOrNull(body['weightKg']);
       final heightCm = _doubleOrNull(body['heightCm']);
       final sex = _sexFromString(body['sex']?.toString());
+      final fitnessGoal = body['fitnessGoal']?.toString();
 
       final session = _userRepository.upsertProfile(
         bearer,
@@ -59,6 +52,7 @@ class MeRoutes {
           weightKg: weightKg,
           heightCm: heightCm,
           sex: sex,
+          fitnessGoal: fitnessGoal,
         ),
       );
       return jsonResponse(session.toJson());
@@ -66,6 +60,25 @@ class MeRoutes {
       return errorResponse(e.message, statusCode: e.statusCode);
     } catch (e) {
       return errorResponse('Unexpected profile error: $e', statusCode: 500);
+    }
+  }
+
+  Future<Response> updateFitnessGoal(Request request) async {
+    try {
+      final bearer = bearerToken(request);
+      if (bearer == null || bearer.isEmpty) {
+        throw ApiException('Unauthorized.', statusCode: 401);
+      }
+
+      final body = await readJsonBody(request);
+      final fitnessGoal = body['fitnessGoal']?.toString();
+
+      final session = _userRepository.updateFitnessGoal(bearer, fitnessGoal);
+      return jsonResponse(session.toJson());
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    } catch (e) {
+      return errorResponse('Unexpected fitness-goal error: $e', statusCode: 500);
     }
   }
 

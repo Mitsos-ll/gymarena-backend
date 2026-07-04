@@ -22,6 +22,8 @@ class AppDatabase {
     instance._createSchema();
     instance._migrateUserAuthAccountsIfNeeded();
     instance._migrateRelationsIfNeeded();
+    instance._migrateCoachInviteRequestsIfNeeded();
+    instance._migrateCoachProgramAssignmentsIfNeeded();
     return instance;
   }
 
@@ -144,9 +146,15 @@ class AppDatabase {
         id TEXT PRIMARY KEY,
         coach_user_id TEXT NOT NULL,
         athlete_user_id TEXT NOT NULL,
-        program_id TEXT NOT NULL,
+        program_type TEXT NOT NULL,
+        program_code TEXT,
+        program_name TEXT NOT NULL,
+        snapshot_json TEXT,
         assigned_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
+        FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (athlete_user_id) REFERENCES users(id) ON DELETE CASCADE,
         UNIQUE(coach_user_id, athlete_user_id)
       );
     ''');
@@ -167,6 +175,48 @@ class AppDatabase {
       );
     ''');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_cpp_public ON coach_public_profiles(is_public);');
+    _addColumnIfMissing('coach_public_profiles', 'photo_url', 'TEXT');
+    _addColumnIfMissing('coach_public_profiles', 'whatsapp', 'TEXT');
+    _addColumnIfMissing('coach_public_profiles', 'instagram', 'TEXT');
+
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS coach_invite_requests (
+        id TEXT PRIMARY KEY,
+        coach_user_id TEXT NOT NULL,
+        athlete_user_id TEXT NOT NULL,
+        athlete_display_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (athlete_user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_cir_coach ON coach_invite_requests(coach_user_id, status);');
+    // Un seul index UNIQUE partiel (pending uniquement) : une paire coach/
+    // athlète peut avoir plusieurs lignes historiques (declined/approved),
+    // contrairement à une UNIQUE(coach_user_id, athlete_user_id, status)
+    // qui provoque une violation de contrainte dès qu'un 2e refus/acceptation
+    // survient pour la même paire.
+    _db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_cir_unique_pending
+      ON coach_invite_requests(coach_user_id, athlete_user_id)
+      WHERE status='pending';
+    ''');
+
+    // ── Invitations d'amis (lien / QR) ──────────────────────────────────────
+    // Contrairement au code coach (usage unique), un code d'invitation ami
+    // est réutilisable par plusieurs destinataires jusqu'à expiration.
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS friend_invite_codes (
+        code TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_fic_user ON friend_invite_codes(user_id);');
 
     // ── Sync — Workouts ─────────────────────────────────────────────────────
     _db.execute('''
@@ -196,12 +246,14 @@ class AppDatabase {
         workout_id TEXT NOT NULL,
         exercise_id TEXT,
         exercise_name_snapshot TEXT,
+        muscle_group_name_snapshot TEXT,
         exercise_order INTEGER NOT NULL,
         notes TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (workout_id) REFERENCES workouts(id) ON DELETE CASCADE
       );
     ''');
+    _addColumnIfMissing('workout_exercises', 'muscle_group_name_snapshot', 'TEXT');
 
     _db.execute('''
       CREATE TABLE IF NOT EXISTS workout_sets (
@@ -223,6 +275,9 @@ class AppDatabase {
         FOREIGN KEY (workout_exercise_id) REFERENCES workout_exercises(id) ON DELETE CASCADE
       );
     ''');
+    // Volume réel de la série (gauche+droite pour un exercice unilatéral) —
+    // distinct de `reps` qui reste le max des deux côtés (affichage, 1RM).
+    _addColumnIfMissing('workout_sets', 'volume_reps', 'INTEGER');
 
     // ── Sync — Exercices custom ─────────────────────────────────────────────
     _db.execute('''
@@ -465,6 +520,90 @@ class AppDatabase {
     final exists = cols.any((r) => r['name'] == column);
     if (!exists) {
       _db.execute('ALTER TABLE $table ADD COLUMN $column $definition;');
+    }
+  }
+
+  void _migrateCoachProgramAssignmentsIfNeeded() {
+    final columns = _db.select('PRAGMA table_info(coach_program_assignments);');
+    if (columns.isEmpty) return;
+    final hasNewSchema = columns.any((r) => r['name'] == 'program_type');
+    if (hasNewSchema) return;
+
+    // Ancienne colonne program_id (référence à programs.id) jamais réellement
+    // utilisée en production (fonctionnalité inaccessible depuis l'UI) —
+    // aucune donnée à préserver, on recrée la table avec le nouveau schéma
+    // (program_type/program_code/program_name/snapshot_json).
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      _db.execute('DROP TABLE coach_program_assignments;');
+      _db.execute('''
+        CREATE TABLE coach_program_assignments (
+          id TEXT PRIMARY KEY,
+          coach_user_id TEXT NOT NULL,
+          athlete_user_id TEXT NOT NULL,
+          program_type TEXT NOT NULL,
+          program_code TEXT,
+          program_name TEXT NOT NULL,
+          snapshot_json TEXT,
+          assigned_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (athlete_user_id) REFERENCES users(id) ON DELETE CASCADE,
+          UNIQUE(coach_user_id, athlete_user_id)
+        );
+      ''');
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_cpa_athlete ON coach_program_assignments(athlete_user_id);');
+      _db.execute('COMMIT;');
+    } catch (e) {
+      _db.execute('ROLLBACK;');
+      rethrow;
+    }
+  }
+
+  void _migrateCoachInviteRequestsIfNeeded() {
+    final indexes = _db.select("PRAGMA index_list(coach_invite_requests);");
+    // La table a été créée avec un UNIQUE(coach_user_id, athlete_user_id,
+    // status) qui provoque une violation de contrainte dès qu'une 2e demande
+    // refusée/acceptée existe pour la même paire coach/athlète. Cet index
+    // "sqlite_autoindex" disparaît une fois la table recréée sans cette
+    // contrainte — sa présence signale qu'une migration est nécessaire.
+    final hasOldConstraint = indexes.any((r) => (r['origin'] as String?) == 'u');
+    if (!hasOldConstraint) return;
+
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      _db.execute('ALTER TABLE coach_invite_requests RENAME TO coach_invite_requests_old;');
+      _db.execute('''
+        CREATE TABLE coach_invite_requests (
+          id TEXT PRIMARY KEY,
+          coach_user_id TEXT NOT NULL,
+          athlete_user_id TEXT NOT NULL,
+          athlete_display_name TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (athlete_user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      ''');
+      _db.execute('''
+        INSERT INTO coach_invite_requests
+          (id, coach_user_id, athlete_user_id, athlete_display_name, status, created_at, updated_at)
+        SELECT id, coach_user_id, athlete_user_id, athlete_display_name, status, created_at, updated_at
+        FROM coach_invite_requests_old;
+      ''');
+      _db.execute('DROP TABLE coach_invite_requests_old;');
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_cir_coach ON coach_invite_requests(coach_user_id, status);');
+      _db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cir_unique_pending
+        ON coach_invite_requests(coach_user_id, athlete_user_id)
+        WHERE status='pending';
+      ''');
+      _db.execute('COMMIT;');
+    } catch (e) {
+      _db.execute('ROLLBACK;');
+      rethrow;
     }
   }
 

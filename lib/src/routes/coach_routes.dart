@@ -1,6 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
+import 'package:path/path.dart' as p;
 import 'package:shelf/shelf.dart';
 import 'package:uuid/uuid.dart';
 
@@ -11,14 +14,22 @@ import '../utils/auth_helper.dart';
 import '../utils/http_json.dart';
 
 class CoachRoutes {
-  CoachRoutes({required UserRepository userRepository, required AppDatabase database})
-      : _repo = userRepository,
-        _db = database;
+  CoachRoutes({
+    required UserRepository userRepository,
+    required AppDatabase database,
+    required String photosDir,
+  })  : _repo = userRepository,
+        _db = database,
+        _photosDir = photosDir;
 
   final UserRepository _repo;
   final AppDatabase _db;
+  final String _photosDir;
   final _uuid = const Uuid();
   final _random = Random.secure();
+
+  static final _safeFilename = RegExp(r'^[a-zA-Z0-9_-]+\.jpg$');
+  static const _maxPhotoBytes = 4 * 1024 * 1024;
 
   static const _codeChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
@@ -41,7 +52,12 @@ class CoachRoutes {
         [code, coachUserId, expiresAt, now],
       );
 
-      return jsonResponse({'code': code, 'expiresAt': expiresAt, 'coachUserId': coachUserId});
+      return jsonResponse({
+        'code': code,
+        'expiresAt': expiresAt,
+        'coachUserId': coachUserId,
+        'createdAt': now,
+      });
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
     }
@@ -125,10 +141,10 @@ class CoachRoutes {
         final lastWorkoutDate = lastWorkoutRows.isEmpty ? null : lastWorkoutRows.first['workout_date'] as String?;
 
         final programRows = _db.raw.select(
-          "SELECT p.name FROM coach_program_assignments cpa JOIN programs p ON p.id=cpa.program_id WHERE cpa.athlete_user_id=? AND cpa.status='active' LIMIT 1",
-          [athleteId],
+          "SELECT program_name FROM coach_program_assignments WHERE coach_user_id=? AND athlete_user_id=? AND status='active' LIMIT 1",
+          [coachUserId, athleteId],
         );
-        final activeProgramName = programRows.isEmpty ? null : programRows.first['name'] as String?;
+        final activeProgramName = programRows.isEmpty ? null : programRows.first['program_name'] as String?;
 
         athletes.add({
           'athleteUserId': athleteId,
@@ -190,30 +206,41 @@ class CoachRoutes {
       for (final w in workoutRows) {
         final workoutId = w['id'] as String;
         final exerciseRows = _db.raw.select(
-          'SELECT we.id, COALESCE(we.exercise_name_snapshot, e.name, we.exercise_id) as name, ws.weight_kg, ws.reps '
+          'SELECT we.id, we.exercise_order, COALESCE(we.exercise_name_snapshot, e.name, we.exercise_id) as name, '
+          'ws.set_number, ws.weight_kg, ws.reps, ws.rpe '
           'FROM workout_exercises we '
           'LEFT JOIN exercises e ON e.id = we.exercise_id '
           'LEFT JOIN workout_sets ws ON ws.workout_exercise_id = we.id '
-          'WHERE we.workout_id=? ORDER BY we.exercise_order, ws.weight_kg DESC',
+          'WHERE we.workout_id=? ORDER BY we.exercise_order, ws.set_number',
           [workoutId],
         );
 
-        // Top set par exercice
-        final seen = <String>{};
-        final exercises = <Map<String, dynamic>>[];
+        // Regroupe par workout_exercise (we.id) — un exercice peut apparaître
+        // deux fois dans la même séance (ex: superset), il ne faut donc pas
+        // dédupliquer par nom.
+        final exercisesById = <String, Map<String, dynamic>>{};
+        final exerciseOrder = <String>[];
         for (final e in exerciseRows) {
-          final name = e['name'] as String? ?? 'Exercice';
-          if (!seen.contains(name)) {
-            seen.add(name);
-            final weight = (e['weight_kg'] as num?)?.toDouble();
-            final reps = e['reps'] as int?;
-            String? topSet;
-            if (weight != null && reps != null && weight > 0) {
-              topSet = '${weight % 1 == 0 ? weight.toInt() : weight}kg x $reps';
-            }
-            exercises.add({'name': name, 'topSet': topSet});
+          final weId = e['id'] as String;
+          if (!exercisesById.containsKey(weId)) {
+            exerciseOrder.add(weId);
+            exercisesById[weId] = {
+              'name': e['name'] as String? ?? 'Exercice',
+              'sets': <Map<String, dynamic>>[],
+            };
+          }
+          final weight = (e['weight_kg'] as num?)?.toDouble();
+          final reps = e['reps'] as int?;
+          if (weight != null && reps != null) {
+            (exercisesById[weId]!['sets'] as List<Map<String, dynamic>>).add({
+              'setNumber': e['set_number'],
+              'weightKg': weight,
+              'reps': reps,
+              'rpe': (e['rpe'] as num?)?.toDouble(),
+            });
           }
         }
+        final exercises = exerciseOrder.map((id) => exercisesById[id]!).toList();
 
         // Note du coach sur ce workout
         final noteRows = _db.raw.select(
@@ -231,10 +258,10 @@ class CoachRoutes {
       }
 
       final programRows = _db.raw.select(
-        "SELECT p.id, p.name FROM coach_program_assignments cpa JOIN programs p ON p.id=cpa.program_id WHERE cpa.athlete_user_id=? AND cpa.status='active' LIMIT 1",
-        [athleteUserId],
+        "SELECT id, program_name FROM coach_program_assignments WHERE coach_user_id=? AND athlete_user_id=? AND status='active' LIMIT 1",
+        [coachUserId, athleteUserId],
       );
-      final activeProgramName = programRows.isEmpty ? null : programRows.first['name'] as String?;
+      final activeProgramName = programRows.isEmpty ? null : programRows.first['program_name'] as String?;
       final activeProgramId = programRows.isEmpty ? null : programRows.first['id'] as String?;
 
       return jsonResponse({
@@ -292,18 +319,82 @@ class CoachRoutes {
       final coachUserId = session.user.id;
 
       final body = await readJsonBody(request);
-      final programId = body['programId']?.toString() ?? '';
-      if (programId.isEmpty) throw ApiException('programId is required.', statusCode: 400);
+      final type = body['type']?.toString() ?? '';
+      final name = body['name']?.toString() ?? '';
+      if (type != 'builtin' && type != 'custom') {
+        throw ApiException('type must be "builtin" or "custom".', statusCode: 400);
+      }
+      if (name.isEmpty) throw ApiException('name is required.', statusCode: 400);
+
+      final code = body['code']?.toString();
+      if (type == 'builtin' && (code == null || code.isEmpty)) {
+        throw ApiException('code is required for a builtin program.', statusCode: 400);
+      }
+
+      final snapshot = body['snapshot'];
+      if (type == 'custom' && snapshot == null) {
+        throw ApiException('snapshot is required for a custom program.', statusCode: 400);
+      }
 
       final now = dbNow();
       final id = _uuid.v4();
 
       _db.raw.execute(
-        'INSERT OR REPLACE INTO coach_program_assignments (id, coach_user_id, athlete_user_id, program_id, assigned_at, status) VALUES (?, ?, ?, ?, ?, ?)',
-        [id, coachUserId, athleteUserId, programId, now, 'active'],
+        'INSERT OR REPLACE INTO coach_program_assignments '
+        '(id, coach_user_id, athlete_user_id, program_type, program_code, program_name, snapshot_json, assigned_at, updated_at, status) '
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+        [
+          id,
+          coachUserId,
+          athleteUserId,
+          type,
+          code,
+          name,
+          snapshot != null ? jsonEncode(snapshot) : null,
+          now,
+          now,
+        ],
       );
 
-      return jsonResponse({'assignmentId': id, 'programId': programId, 'assignedAt': now});
+      return jsonResponse({
+        'id': id,
+        'coachUserId': coachUserId,
+        'athleteUserId': athleteUserId,
+        'programType': type,
+        'programCode': code,
+        'programName': name,
+        'assignedAt': now,
+      });
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> getAssignedProgram(Request request) async {
+    try {
+      final session = requireAuth(request, _repo);
+      final athleteUserId = session.user.id;
+
+      final rows = _db.raw.select(
+        "SELECT * FROM coach_program_assignments WHERE athlete_user_id=? AND status='active' LIMIT 1",
+        [athleteUserId],
+      );
+      if (rows.isEmpty) return jsonResponse({'assignment': null});
+
+      final row = rows.first;
+      return jsonResponse({
+        'assignment': {
+          'id': row['id'],
+          'coachUserId': row['coach_user_id'],
+          'athleteUserId': row['athlete_user_id'],
+          'programType': row['program_type'],
+          'programCode': row['program_code'],
+          'programName': row['program_name'],
+          'snapshot': row['snapshot_json'] != null ? jsonDecode(row['snapshot_json'] as String) : null,
+          'assignedAt': row['assigned_at'],
+          'updatedAt': row['updated_at'],
+        },
+      });
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
     }
@@ -339,8 +430,8 @@ class CoachRoutes {
       final now = dbNow();
 
       _db.raw.execute(
-        'INSERT OR REPLACE INTO coach_public_profiles (coach_user_id, display_name, bio, speciality, location, languages, is_public, created_at, updated_at) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM coach_public_profiles WHERE coach_user_id=?), ?), ?)',
+        'INSERT OR REPLACE INTO coach_public_profiles (coach_user_id, display_name, bio, speciality, location, languages, is_public, photo_url, whatsapp, instagram, created_at, updated_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT photo_url FROM coach_public_profiles WHERE coach_user_id=?), ?, ?, COALESCE((SELECT created_at FROM coach_public_profiles WHERE coach_user_id=?), ?), ?)',
         [
           coachUserId,
           displayName,
@@ -349,6 +440,9 @@ class CoachRoutes {
           body['location'],
           jsonEncode(body['languages'] ?? []),
           (body['isPublic'] == true) ? 1 : 0,
+          coachUserId,
+          body['whatsapp'],
+          body['instagram'],
           coachUserId,
           now,
           now,
@@ -361,6 +455,24 @@ class CoachRoutes {
       );
 
       return jsonResponse(_profileRowToJson(rows.first));
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> getMyPublicProfile(Request request) async {
+    try {
+      final session = requireAuth(request, _repo);
+      requireCoach(session);
+      final coachUserId = session.user.id;
+
+      final rows = _db.raw.select(
+        'SELECT * FROM coach_public_profiles WHERE coach_user_id=? LIMIT 1',
+        [coachUserId],
+      );
+      if (rows.isEmpty) return jsonResponse({'profile': null});
+
+      return jsonResponse({'profile': _profileRowToJson(rows.first)});
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
     }
@@ -380,7 +492,243 @@ class CoachRoutes {
     }
   }
 
-  // ── Athlete side: revoke coach ────────────────────────────────────────────
+  // ── Public profile photo ──────────────────────────────────────────────────
+
+  Future<Response> uploadProfilePhoto(Request request) async {
+    try {
+      final session = requireAuth(request, _repo);
+      requireCoach(session);
+      final coachUserId = session.user.id;
+      final displayName = session.profile?.displayName ?? 'Coach';
+
+      final body = await readJsonBody(request);
+      final base64Image = body['imageBase64']?.toString() ?? '';
+      if (base64Image.isEmpty) {
+        throw ApiException('imageBase64 is required.', statusCode: 400);
+      }
+
+      final Uint8List bytes;
+      try {
+        bytes = base64Decode(base64Image);
+      } on FormatException {
+        throw ApiException('imageBase64 is not valid base64.', statusCode: 400);
+      }
+      if (bytes.length > _maxPhotoBytes) {
+        throw ApiException('Image too large.', statusCode: 400);
+      }
+
+      final dir = Directory(_photosDir);
+      dir.createSync(recursive: true);
+      final filename = '$coachUserId.jpg';
+      File(p.join(dir.path, filename)).writeAsBytesSync(bytes);
+
+      final photoUrl = '/coach-photos/$filename';
+      final now = dbNow();
+
+      _db.raw.execute(
+        'INSERT INTO coach_public_profiles (coach_user_id, display_name, languages, is_public, photo_url, created_at, updated_at) '
+        "VALUES (?, ?, '[]', 0, ?, ?, ?) "
+        'ON CONFLICT(coach_user_id) DO UPDATE SET photo_url=excluded.photo_url, updated_at=excluded.updated_at',
+        [coachUserId, displayName, photoUrl, now, now],
+      );
+
+      final rows = _db.raw.select(
+        'SELECT * FROM coach_public_profiles WHERE coach_user_id=? LIMIT 1',
+        [coachUserId],
+      );
+
+      return jsonResponse(_profileRowToJson(rows.first));
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Response servePhoto(Request request, String filename) {
+    if (!_safeFilename.hasMatch(filename)) {
+      return errorResponse('Not found.', statusCode: 404);
+    }
+    final file = File(p.join(_photosDir, filename));
+    if (!file.existsSync()) {
+      return errorResponse('Not found.', statusCode: 404);
+    }
+    return Response.ok(
+      file.readAsBytesSync(),
+      headers: {'Content-Type': 'image/jpeg'},
+    );
+  }
+
+  // ── Invite requests (athlète → coach depuis l'annuaire public) ───────────
+
+  Future<Response> requestInvite(Request request, String coachUserId) async {
+    try {
+      final session = requireAuth(request, _repo);
+      final athleteUserId = session.user.id;
+      final athleteDisplayName = session.profile?.displayName ?? 'Athlète';
+
+      if (coachUserId == athleteUserId) {
+        throw ApiException('You cannot request yourself as coach.', statusCode: 400);
+      }
+
+      final existingCoachRows = _db.raw.select(
+        "SELECT id FROM coach_athlete_links WHERE athlete_user_id=? AND status='active' LIMIT 1",
+        [athleteUserId],
+      );
+      if (existingCoachRows.isNotEmpty) {
+        throw ApiException('You already have a coach.', statusCode: 409);
+      }
+
+      final pendingRows = _db.raw.select(
+        "SELECT id FROM coach_invite_requests WHERE athlete_user_id=? AND status='pending' LIMIT 1",
+        [athleteUserId],
+      );
+      if (pendingRows.isNotEmpty) {
+        throw ApiException('You already have a pending request.', statusCode: 409);
+      }
+
+      final now = dbNow();
+      _db.raw.execute(
+        'INSERT OR IGNORE INTO coach_invite_requests '
+        '(id, coach_user_id, athlete_user_id, athlete_display_name, status, created_at, updated_at) '
+        "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        [_uuid.v4(), coachUserId, athleteUserId, athleteDisplayName, now, now],
+      );
+
+      final rows = _db.raw.select(
+        "SELECT * FROM coach_invite_requests WHERE coach_user_id=? AND athlete_user_id=? AND status='pending' LIMIT 1",
+        [coachUserId, athleteUserId],
+      );
+
+      return jsonResponse(_requestRowToJson(rows.first));
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> getInviteRequests(Request request) async {
+    try {
+      final session = requireAuth(request, _repo);
+      requireCoach(session);
+      final coachUserId = session.user.id;
+
+      final rows = _db.raw.select(
+        "SELECT * FROM coach_invite_requests WHERE coach_user_id=? AND status='pending' ORDER BY created_at DESC",
+        [coachUserId],
+      );
+
+      return jsonResponse({'requests': rows.map(_requestRowToJson).toList()});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> approveInviteRequest(Request request, String requestId) async {
+    try {
+      final session = requireAuth(request, _repo);
+      requireCoach(session);
+      final coachUserId = session.user.id;
+
+      final rows = _db.raw.select(
+        "SELECT * FROM coach_invite_requests WHERE id=? AND coach_user_id=? AND status='pending' LIMIT 1",
+        [requestId, coachUserId],
+      );
+      if (rows.isEmpty) throw ApiException('Request not found.', statusCode: 404);
+      final athleteUserId = rows.first['athlete_user_id'] as String;
+
+      final now = dbNow();
+      final linkId = _uuid.v4();
+
+      _db.raw.execute(
+        "UPDATE coach_invite_requests SET status='approved', updated_at=? WHERE id=?",
+        [now, requestId],
+      );
+      _db.raw.execute(
+        'INSERT OR REPLACE INTO coach_athlete_links (id, coach_user_id, athlete_user_id, status, linked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [linkId, coachUserId, athleteUserId, 'active', now, now],
+      );
+
+      return jsonResponse({
+        'link': {
+          'id': linkId,
+          'coachUserId': coachUserId,
+          'athleteUserId': athleteUserId,
+          'linkedAt': now,
+          'status': 'active',
+          'updatedAt': now,
+        },
+      });
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> declineInviteRequest(Request request, String requestId) async {
+    try {
+      final session = requireAuth(request, _repo);
+      requireCoach(session);
+      final coachUserId = session.user.id;
+
+      final rows = _db.raw.select(
+        "SELECT id FROM coach_invite_requests WHERE id=? AND coach_user_id=? AND status='pending' LIMIT 1",
+        [requestId, coachUserId],
+      );
+      if (rows.isEmpty) throw ApiException('Request not found.', statusCode: 404);
+
+      _db.raw.execute(
+        "UPDATE coach_invite_requests SET status='declined', updated_at=? WHERE id=?",
+        [dbNow(), requestId],
+      );
+
+      return jsonResponse({'ok': true});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Map<String, dynamic> _requestRowToJson(Map<String, Object?> row) {
+    return {
+      'id': row['id'],
+      'coachUserId': row['coach_user_id'],
+      'athleteUserId': row['athlete_user_id'],
+      'athleteDisplayName': row['athlete_display_name'],
+      'status': row['status'],
+      'createdAt': row['created_at'],
+      'updatedAt': row['updated_at'],
+    };
+  }
+
+  // ── Athlete side: my coach / revoke ───────────────────────────────────────
+
+  Future<Response> getMyCoach(Request request) async {
+    try {
+      final session = requireAuth(request, _repo);
+      final athleteUserId = session.user.id;
+
+      final linkRows = _db.raw.select(
+        "SELECT coach_user_id FROM coach_athlete_links WHERE athlete_user_id=? AND status='active' LIMIT 1",
+        [athleteUserId],
+      );
+      if (linkRows.isEmpty) return jsonResponse({'coach': null});
+
+      final coachUserId = linkRows.first['coach_user_id'] as String;
+      final profileRows = _db.raw.select(
+        'SELECT display_name FROM user_profiles WHERE user_id=? LIMIT 1',
+        [coachUserId],
+      );
+      final displayName = profileRows.isEmpty ? 'Coach' : profileRows.first['display_name'] as String;
+
+      final publicProfileRows = _db.raw.select(
+        'SELECT photo_url FROM coach_public_profiles WHERE coach_user_id=? LIMIT 1',
+        [coachUserId],
+      );
+      final photoUrl = publicProfileRows.isEmpty ? null : publicProfileRows.first['photo_url'] as String?;
+
+      return jsonResponse({
+        'coach': {'coachUserId': coachUserId, 'displayName': displayName, 'photoUrl': photoUrl},
+      });
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
 
   Future<Response> revokeCoach(Request request) async {
     try {
@@ -407,6 +755,9 @@ class CoachRoutes {
       'location': row['location'],
       'languages': jsonDecode(row['languages'] as String? ?? '[]'),
       'isPublic': (row['is_public'] as int? ?? 0) == 1,
+      'photoUrl': row['photo_url'],
+      'whatsapp': row['whatsapp'],
+      'instagram': row['instagram'],
       'createdAt': row['created_at'],
       'updatedAt': row['updated_at'],
     };

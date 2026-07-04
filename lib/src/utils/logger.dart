@@ -54,6 +54,7 @@ void logError(String msg, Object error, StackTrace? stack, {String? requestId}) 
       msg,
       <String, dynamic>{
         if (requestId != null) 'req_id': requestId,
+        'error': error.toString(),
       },
       stack,
     );

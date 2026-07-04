@@ -48,7 +48,7 @@ class SyncRoutes {
       for (final w in workouts) {
         final workoutId = w['id'] as String;
         final exercises = _db.raw.select(
-          'SELECT we.*, ws.id as ws_id, ws.set_number, ws.weight_kg, ws.reps, ws.rpe, ws.rest_time_seconds, ws.estimated_1rm, ws.set_type '
+          'SELECT we.*, ws.id as ws_id, ws.set_number, ws.weight_kg, ws.reps, ws.volume_reps, ws.rpe, ws.rest_time_seconds, ws.estimated_1rm, ws.set_type '
           'FROM workout_exercises we LEFT JOIN workout_sets ws ON ws.workout_exercise_id=we.id '
           'WHERE we.workout_id=? ORDER BY we.exercise_order, ws.set_number',
           [workoutId],
@@ -70,6 +70,7 @@ class SyncRoutes {
               'setNumber': row['set_number'],
               'weightKg': row['weight_kg'],
               'reps': row['reps'],
+              'volumeReps': row['volume_reps'],
               'rpe': row['rpe'],
               'restTimeSeconds': row['rest_time_seconds'],
               'estimated1Rm': row['estimated_1rm'],
@@ -326,17 +327,17 @@ class SyncRoutes {
         for (final ex in exercises) {
           final weId = _uuid.v4();
           _db.raw.execute(
-            'INSERT INTO workout_exercises (id, workout_id, exercise_id, exercise_name_snapshot, exercise_order, notes, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [weId, id, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['notes'], now],
+            'INSERT INTO workout_exercises (id, workout_id, exercise_id, exercise_name_snapshot, muscle_group_name_snapshot, exercise_order, notes, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [weId, id, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['muscleGroupNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['notes'], now],
           );
           final sets = (ex['sets'] as List?)?.cast<Map<String, dynamic>>() ?? [];
           for (final s in sets) {
             final wsId = _uuid.v4();
             _db.raw.execute(
-              'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, rpe, rest_time_seconds, estimated_1rm, set_type, created_at) '
-              'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['setType'] ?? 'normal', now],
+              'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, volume_reps, rpe, rest_time_seconds, estimated_1rm, set_type, created_at) '
+              'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+              [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['volumeReps'] ?? s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['setType'] ?? 'normal', now],
             );
           }
         }
@@ -381,9 +382,9 @@ class SyncRoutes {
       for (final ex in exercises) {
         final weId = _uuid.v4();
         _db.raw.execute(
-          'INSERT INTO workout_exercises (id, workout_id, exercise_id, exercise_name_snapshot, exercise_order, notes, created_at) '
-          'VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [weId, id, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['notes'], now],
+          'INSERT INTO workout_exercises (id, workout_id, exercise_id, exercise_name_snapshot, muscle_group_name_snapshot, exercise_order, notes, created_at) '
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [weId, id, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['muscleGroupNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['notes'], now],
         );
 
         final sets = (ex['sets'] as List?)?.cast<Map<String, dynamic>>() ?? [];
@@ -1116,6 +1117,97 @@ class SyncRoutes {
           'snapshotJson': jsonDecode(r['snapshot_json'] as String? ?? '{}'),
           'createdAt': r['created_at'],
         }).toList(),
+      });
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  // ── GET /community/friends/<friendUserId>/exercise-stats ─────────────────
+  //
+  // Stats agrégées (meilleur 1RM estimé par exercice, volume par groupe
+  // musculaire) pour un ami sur une période donnée. Accessible uniquement
+  // si une relation acceptée existe entre l'appelant et friendUserId —
+  // aucune donnée brute de séance n'est exposée, seulement les agrégats.
+
+  Future<Response> getFriendExerciseStats(
+      Request request, String friendUserId) async {
+    try {
+      final session = requireAuth(request, _repo);
+      final userId = session.user.id;
+
+      final relation = _db.raw.select(
+        "SELECT id FROM social_relations WHERE ((user_id_a=? AND user_id_b=?) OR (user_id_a=? AND user_id_b=?)) AND request_status='accepted' LIMIT 1",
+        [userId, friendUserId, friendUserId, userId],
+      );
+      if (relation.isEmpty) {
+        throw ApiException('Not authorized to view this athlete.', statusCode: 403);
+      }
+
+      final days = int.tryParse(
+              request.url.queryParameters['days'] ?? '30') ??
+          30;
+      final since = DateTime.now()
+          .toUtc()
+          .subtract(Duration(days: days))
+          .toIso8601String()
+          .substring(0, 10);
+
+      final rows = _db.raw.select(
+        'SELECT COALESCE(e.name, we.exercise_name_snapshot) as exercise_name, '
+        'COALESCE(e.muscle_group_name, we.muscle_group_name_snapshot) as muscle_group_name, '
+        'ws.weight_kg as weight_kg, ws.reps as reps, COALESCE(ws.volume_reps, ws.reps) as volume_reps '
+        'FROM workouts w '
+        'JOIN workout_exercises we ON we.workout_id = w.id '
+        'JOIN workout_sets ws ON ws.workout_exercise_id = we.id '
+        'LEFT JOIN exercises e ON e.id = we.exercise_id '
+        'WHERE w.user_id=? AND w.workout_date >= ?',
+        [friendUserId, since],
+      );
+
+      // Regroupement insensible à la casse (deux comptes peuvent nommer un
+      // exercice custom différemment en casse) tout en conservant le premier
+      // libellé rencontré pour l'affichage.
+      final best1RmByExerciseKey = <String, double>{};
+      final exerciseDisplayNames = <String, String>{};
+      final volumeByMuscle = <String, double>{};
+
+      for (final r in rows) {
+        final rawExerciseName = (r['exercise_name'] as String?)?.trim();
+        final exerciseKey = rawExerciseName?.toLowerCase();
+        final weight = (r['weight_kg'] as num?)?.toDouble() ?? 0;
+        final reps = (r['reps'] as num?)?.toInt() ?? 0;
+        final volumeReps = (r['volume_reps'] as num?)?.toInt() ?? reps;
+        if (weight <= 0 || reps <= 0) continue;
+
+        final estimated1Rm = weight * (1 + reps / 30.0);
+        if (exerciseKey != null && exerciseKey.isNotEmpty) {
+          exerciseDisplayNames.putIfAbsent(exerciseKey, () => rawExerciseName!);
+          final current = best1RmByExerciseKey[exerciseKey];
+          if (current == null || estimated1Rm > current) {
+            best1RmByExerciseKey[exerciseKey] = estimated1Rm;
+          }
+        }
+
+        final muscleGroup = (r['muscle_group_name'] as String?)?.trim();
+        if (muscleGroup != null && muscleGroup.isNotEmpty) {
+          volumeByMuscle[muscleGroup] =
+              (volumeByMuscle[muscleGroup] ?? 0) + weight * volumeReps;
+        }
+      }
+
+      return jsonResponse({
+        'friendUserId': friendUserId,
+        'sinceDate': since,
+        'exercises': best1RmByExerciseKey.entries
+            .map((e) => {
+                  'name': exerciseDisplayNames[e.key] ?? e.key,
+                  'best1RmKg': e.value,
+                })
+            .toList(),
+        'muscles': volumeByMuscle.entries
+            .map((e) => {'name': e.key, 'volumeKg': e.value})
+            .toList(),
       });
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);

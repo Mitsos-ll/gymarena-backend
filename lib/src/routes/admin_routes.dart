@@ -88,6 +88,32 @@ class AdminRoutes {
     return jsonResponse({'userId': userId, 'workouts': result, 'total': result.length});
   }
 
+  Response debugWorkoutDetail(Request request, String workoutId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    final rows = db.select(
+      'SELECT we.id as we_id, COALESCE(e.name, we.exercise_name_snapshot) as exercise_name, '
+      'e.muscle_group_name as muscle_group_name, ws.weight_kg, ws.reps '
+      'FROM workout_exercises we '
+      'LEFT JOIN exercises e ON e.id = we.exercise_id '
+      'LEFT JOIN workout_sets ws ON ws.workout_exercise_id = we.id '
+      'WHERE we.workout_id=?',
+      [workoutId],
+    );
+    return jsonResponse({
+      'workoutId': workoutId,
+      'rows': rows.map((r) => {
+        'exerciseName': r['exercise_name'],
+        'muscleGroupName': r['muscle_group_name'],
+        'weightKg': r['weight_kg'],
+        'reps': r['reps'],
+      }).toList(),
+    });
+  }
+
   Response deleteUserWorkout(Request request, String userId, String workoutId) {
     final auth = request.headers['authorization'] ?? '';
     if (auth != 'Bearer $adminSecret') {
@@ -129,6 +155,51 @@ class AdminRoutes {
     final db = database.raw;
     db.execute('DELETE FROM programs WHERE user_id=?', [userId]);
     return jsonResponse({'deleted': true, 'userId': userId});
+  }
+
+  Response debugListUsers(Request request) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    final users = db.select(
+      'SELECT id, email, display_name FROM users WHERE is_deleted = 0 ORDER BY created_at DESC',
+    );
+    final relations = db.select(
+      "SELECT user_id_a, user_id_b, status, request_status FROM social_relations WHERE request_status='accepted'",
+    );
+    final workoutCounts = db.select(
+      'SELECT user_id, COUNT(*) as c FROM workouts GROUP BY user_id',
+    );
+    return jsonResponse({
+      'users': users.map((r) => {
+        'id': r['id'], 'email': r['email'], 'displayName': r['display_name'],
+      }).toList(),
+      'acceptedRelations': relations.map((r) => {
+        'userIdA': r['user_id_a'], 'userIdB': r['user_id_b'], 'status': r['status'],
+      }).toList(),
+      'workoutCounts': workoutCounts.map((r) => {
+        'userId': r['user_id'], 'count': r['c'],
+      }).toList(),
+    });
+  }
+
+  Response debugDisplayName(Request request, String userId) {
+    final auth = request.headers['authorization'] ?? '';
+    if (auth != 'Bearer $adminSecret') {
+      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
+    }
+    final db = database.raw;
+    final cp = db.select('SELECT display_name FROM community_profiles WHERE user_id=?', [userId]);
+    final up = db.select('SELECT display_name FROM user_profiles WHERE user_id=?', [userId]);
+    final u = db.select('SELECT display_name FROM users WHERE id=?', [userId]);
+    return jsonResponse({
+      'userId': userId,
+      'community_profiles.display_name': cp.isNotEmpty ? cp.first['display_name'] : '<no row>',
+      'user_profiles.display_name': up.isNotEmpty ? up.first['display_name'] : '<no row>',
+      'users.display_name': u.isNotEmpty ? u.first['display_name'] : '<no row>',
+    });
   }
 
   Response debugUserSync(Request request, String userId) {

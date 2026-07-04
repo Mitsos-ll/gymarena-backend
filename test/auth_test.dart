@@ -139,6 +139,102 @@ void main() {
     });
   });
 
+  // ── Forgot / reset password ──────────────────────────────────────────────────
+
+  group('POST /auth/forgot-password + /auth/reset-password', () {
+    test('forgot-password returns ok for both existing and unknown emails', () async {
+      await post('/auth/register', {
+        'email': 'forgot@example.com',
+        'password': 'password123',
+      });
+
+      final known = await post('/auth/forgot-password', {'email': 'forgot@example.com'});
+      final unknown = await post('/auth/forgot-password', {'email': 'nobody@example.com'});
+
+      expect(known.statusCode, 200);
+      expect(unknown.statusCode, 200);
+      final knownBody = jsonDecode(await known.readAsString()) as Map;
+      final unknownBody = jsonDecode(await unknown.readAsString()) as Map;
+      expect(knownBody['ok'], true);
+      expect(unknownBody['ok'], true);
+    });
+
+    test('reset-password with a valid code changes the password and revokes sessions', () async {
+      final regRes = await post('/auth/register', {
+        'email': 'reset@example.com',
+        'password': 'oldpassword123',
+      });
+      final accessToken =
+          (jsonDecode(await regRes.readAsString()) as Map)['accessToken'] as String;
+
+      final result = backend.userRepository.requestPasswordReset('reset@example.com');
+      expect(result.code, isNotNull);
+
+      final resetRes = await post('/auth/reset-password', {
+        'email': 'reset@example.com',
+        'code': result.code,
+        'newPassword': 'newpassword456',
+      });
+      expect(resetRes.statusCode, 200);
+
+      // L'ancien access token doit être révoqué.
+      final meRes = await backend.handler(
+        Request('GET', Uri.parse('http://localhost/me'),
+            headers: {'Authorization': 'Bearer $accessToken'}),
+      );
+      expect(meRes.statusCode, 401);
+
+      // L'ancien mot de passe ne fonctionne plus, le nouveau oui.
+      final oldLogin = await post('/auth/login', {
+        'email': 'reset@example.com',
+        'password': 'oldpassword123',
+      });
+      expect(oldLogin.statusCode, 401);
+
+      final newLogin = await post('/auth/login', {
+        'email': 'reset@example.com',
+        'password': 'newpassword456',
+      });
+      expect(newLogin.statusCode, 200);
+    });
+
+    test('reset-password rejects an invalid code with 400', () async {
+      await post('/auth/register', {
+        'email': 'badcode@example.com',
+        'password': 'password123',
+      });
+
+      final res = await post('/auth/reset-password', {
+        'email': 'badcode@example.com',
+        'code': '000000',
+        'newPassword': 'newpassword456',
+      });
+      expect(res.statusCode, 400);
+    });
+
+    test('reset-password rejects reusing an already-used code with 400', () async {
+      await post('/auth/register', {
+        'email': 'reuse@example.com',
+        'password': 'password123',
+      });
+      final result = backend.userRepository.requestPasswordReset('reuse@example.com');
+
+      final first = await post('/auth/reset-password', {
+        'email': 'reuse@example.com',
+        'code': result.code,
+        'newPassword': 'newpassword456',
+      });
+      expect(first.statusCode, 200);
+
+      final second = await post('/auth/reset-password', {
+        'email': 'reuse@example.com',
+        'code': result.code,
+        'newPassword': 'anotherpassword789',
+      });
+      expect(second.statusCode, 400);
+    });
+  });
+
   // ── Logout ─────────────────────────────────────────────────────────────────
 
   group('POST /auth/logout', () {

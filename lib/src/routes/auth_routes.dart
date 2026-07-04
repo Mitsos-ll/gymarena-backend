@@ -2,6 +2,7 @@ import 'package:shelf/shelf.dart';
 
 import '../middleware/rate_limit_middleware.dart';
 import '../repositories/user_repository.dart';
+import '../services/email_service.dart';
 import '../services/google_token_service.dart';
 import '../utils/api_exception.dart';
 import '../utils/http_json.dart';
@@ -12,13 +13,16 @@ class AuthRoutes {
     required GoogleTokenService googleTokenService,
     required UserRepository userRepository,
     required RateLimiter authLimiter,
+    required EmailService emailService,
   })  : _googleTokenService = googleTokenService,
         _userRepository = userRepository,
-        _authLimiter = authLimiter;
+        _authLimiter = authLimiter,
+        _emailService = emailService;
 
   final GoogleTokenService _googleTokenService;
   final UserRepository _userRepository;
   final RateLimiter _authLimiter;
+  final EmailService _emailService;
 
   Future<Response> signInGoogle(Request request) async {
     try {
@@ -92,6 +96,51 @@ class AuthRoutes {
       if (bearer != null && bearer.isNotEmpty) {
         _userRepository.logoutByBearerToken(bearer);
       }
+      return jsonResponse({'ok': true});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> forgotPassword(Request request) async {
+    try {
+      _enforceAuthLimit(request);
+      final body = await readJsonBody(request);
+      final email = validateEmail(body['email']?.toString());
+
+      final result = _userRepository.requestPasswordReset(email);
+      if (result.email != null && result.code != null) {
+        await _emailService.sendPasswordResetCode(
+          toEmail: result.email!,
+          code: result.code!,
+        );
+      }
+
+      // Réponse toujours identique, que le compte existe ou non — on ne
+      // révèle jamais quels emails sont enregistrés.
+      return jsonResponse({
+        'ok': true,
+        'message': 'If an account exists for this email, a reset code has been sent.',
+      });
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> resetPassword(Request request) async {
+    try {
+      _enforceAuthLimit(request);
+      final body = await readJsonBody(request);
+      final email = validateEmail(body['email']?.toString());
+      final code = validateResetCode(body['code']?.toString());
+      final newPassword = validatePassword(body['newPassword']?.toString());
+
+      _userRepository.resetPasswordWithCode(
+        email: email,
+        code: code,
+        newPassword: newPassword,
+      );
+
       return jsonResponse({'ok': true});
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);

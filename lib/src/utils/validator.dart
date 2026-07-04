@@ -55,6 +55,18 @@ String validateRefreshToken(String? raw) {
   return token;
 }
 
+final _resetCodeRegex = RegExp(r'^[0-9]{6}$');
+
+/// Valide un code de réinitialisation de mot de passe (6 chiffres).
+String validateResetCode(String? raw) {
+  final code = raw?.trim() ?? '';
+  if (code.isEmpty) throw ApiException('code is required.', statusCode: 400);
+  if (!_resetCodeRegex.hasMatch(code)) {
+    throw ApiException('code must be 6 digits.', statusCode: 400);
+  }
+  return code;
+}
+
 /// Valide une valeur numérique optionnelle dans une fourchette.
 double? validateOptionalDouble(
   dynamic raw, {

@@ -14,6 +14,8 @@ class AppConfig {
     required this.authRateLimitMaxRequests,
     required this.authRateLimitWindowSeconds,
     required this.adminSecret,
+    required this.resendApiKey,
+    required this.resendFromEmail,
   });
 
   final int port;
@@ -28,6 +30,8 @@ class AppConfig {
   final int authRateLimitMaxRequests;
   final int authRateLimitWindowSeconds;
   final String adminSecret;
+  final String resendApiKey;
+  final String resendFromEmail;
 
   bool get isProduction => env == 'production';
 
@@ -64,6 +68,8 @@ class AppConfig {
       authRateLimitMaxRequests: getInt('AUTH_RATE_LIMIT_MAX_REQUESTS', 10),
       authRateLimitWindowSeconds: getInt('AUTH_RATE_LIMIT_WINDOW_SECONDS', 60),
       adminSecret: require('ADMIN_SECRET'),
+      resendApiKey: get('RESEND_API_KEY', ''),
+      resendFromEmail: get('RESEND_FROM_EMAIL', 'onboarding@resend.dev'),
     );
   }
 }

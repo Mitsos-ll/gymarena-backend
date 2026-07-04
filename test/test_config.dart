@@ -13,4 +13,6 @@ AppConfig testConfig() => AppConfig(
       authRateLimitMaxRequests: 1000,
       authRateLimitWindowSeconds: 60,
       adminSecret: 'test-admin-secret',
+      resendApiKey: '',
+      resendFromEmail: 'onboarding@resend.dev',
     );

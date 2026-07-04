@@ -17,6 +17,7 @@ import 'routes/coach_routes.dart';
 import 'routes/invite_routes.dart';
 import 'routes/me_routes.dart';
 import 'routes/sync_routes.dart';
+import 'services/email_service.dart';
 import 'services/google_token_service.dart';
 import 'services/session_service.dart';
 import 'utils/http_json.dart';
@@ -31,6 +32,10 @@ class GymTrackBackend {
         ),
         googleTokenService = GoogleTokenService(
           webClientId: config.googleWebClientId,
+        ),
+        emailService = EmailService(
+          apiKey: config.resendApiKey,
+          fromEmail: config.resendFromEmail,
         ),
         _globalLimiter = RateLimiter(
           maxRequests: config.rateLimitMaxRequests,
@@ -48,6 +53,7 @@ class GymTrackBackend {
       googleTokenService: googleTokenService,
       userRepository: userRepository,
       authLimiter: _authLimiter,
+      emailService: emailService,
     );
     meRoutes = MeRoutes(userRepository: userRepository);
     adminRoutes = AdminRoutes(database: database, adminSecret: config.adminSecret);
@@ -64,6 +70,7 @@ class GymTrackBackend {
   final AppDatabase database;
   final SessionService sessionService;
   final GoogleTokenService googleTokenService;
+  final EmailService emailService;
   final RateLimiter _globalLimiter;
   final RateLimiter _authLimiter;
   late final UserRepository userRepository;
@@ -85,6 +92,8 @@ class GymTrackBackend {
     router.post('/auth/login', authRoutes.login);
     router.post('/auth/refresh', authRoutes.refresh);
     router.post('/auth/logout', authRoutes.logout);
+    router.post('/auth/forgot-password', authRoutes.forgotPassword);
+    router.post('/auth/reset-password', authRoutes.resetPassword);
 
     router.get('/me', meRoutes.getMe);
     router.put('/me/profile', meRoutes.upsertProfile);

@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:uuid/uuid.dart';
 
 import '../db/app_database.dart';
@@ -19,6 +21,9 @@ class UserRepository {
   final AppDatabase _database;
   final SessionService _sessionService;
   final _uuid = const Uuid();
+  final _random = Random.secure();
+
+  static const _resetCodeValidityMinutes = 15;
 
   // ── Google OAuth ────────────────────────────────────────────────────────────
 
@@ -126,6 +131,82 @@ class UserRepository {
       profile: profile,
     );
   }
+
+  // ── Mot de passe oublié ──────────────────────────────────────────────────────
+
+  /// Génère un code de reset si un compte gymtrack existe pour cet email.
+  /// Retourne `email: null` si aucun compte ne correspond, pour que la route
+  /// puisse répondre de façon générique sans révéler quels emails existent.
+  PasswordResetRequest requestPasswordReset(String email) {
+    final normalizedEmail = email.trim().toLowerCase();
+    final account = _findGymTrackAuthAccountByEmail(normalizedEmail);
+    if (account == null) {
+      return PasswordResetRequest(email: null, code: null);
+    }
+
+    final userId = account['user_id'] as String;
+    final now = dbNow();
+    final code = _generateResetCode();
+    final expiresAt = DateTime.now()
+        .toUtc()
+        .add(const Duration(minutes: _resetCodeValidityMinutes))
+        .toIso8601String();
+
+    _database.raw.execute(
+      'INSERT INTO password_reset_codes (id, user_id, code, expires_at, used_at, created_at) '
+      'VALUES (?, ?, ?, ?, NULL, ?)',
+      [_uuid.v4(), userId, code, expiresAt, now],
+    );
+
+    return PasswordResetRequest(email: normalizedEmail, code: code);
+  }
+
+  void resetPasswordWithCode({
+    required String email,
+    required String code,
+    required String newPassword,
+  }) {
+    final normalizedEmail = email.trim().toLowerCase();
+    final account = _findGymTrackAuthAccountByEmail(normalizedEmail);
+    if (account == null) {
+      throw ApiException('Invalid or expired code.', statusCode: 400);
+    }
+
+    final userId = account['user_id'] as String;
+    final now = dbNow();
+
+    final rows = _database.raw.select(
+      'SELECT id FROM password_reset_codes '
+      'WHERE user_id=? AND code=? AND used_at IS NULL AND expires_at > ? '
+      'ORDER BY created_at DESC LIMIT 1',
+      [userId, code, now],
+    );
+    if (rows.isEmpty) {
+      throw ApiException('Invalid or expired code.', statusCode: 400);
+    }
+
+    final newHash = hashPassword(newPassword);
+    _database.raw.execute(
+      "UPDATE user_auth_accounts SET password_hash=?, password_salt=NULL, updated_at=? "
+      "WHERE user_id=? AND provider='gymtrack'",
+      [newHash, now, userId],
+    );
+
+    _database.raw.execute(
+      'UPDATE password_reset_codes SET used_at=? WHERE id=?',
+      [now, rows.first['id']],
+    );
+
+    // Comme pour tout changement de mot de passe : on invalide les sessions
+    // actives, au cas où le mot de passe précédent était compromis.
+    _database.raw.execute(
+      'UPDATE auth_sessions SET revoked_at=?, updated_at=? WHERE user_id=? AND revoked_at IS NULL',
+      [now, now, userId],
+    );
+  }
+
+  String _generateResetCode() =>
+      _random.nextInt(1000000).toString().padLeft(6, '0');
 
   // ── Sessions ────────────────────────────────────────────────────────────────
 
@@ -420,4 +501,12 @@ class ApiProfileInput {
   final double? heightCm;
   final UserSex sex;
   final String? fitnessGoal;
+}
+
+class PasswordResetRequest {
+  PasswordResetRequest({required this.email, required this.code});
+
+  /// null si aucun compte gymtrack ne correspond à l'email fourni.
+  final String? email;
+  final String? code;
 }

@@ -4,6 +4,7 @@ import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
 import '../lib/src/app.dart';
+import '../lib/src/services/google_token_service.dart';
 import 'test_config.dart';
 
 void main() {
@@ -232,6 +233,47 @@ void main() {
         'newPassword': 'anotherpassword789',
       });
       expect(second.statusCode, 400);
+    });
+  });
+
+  // ── Google sign-in ───────────────────────────────────────────────────────────
+
+  group('signInWithGoogle', () {
+    GoogleTokenPayload payload(String email, {String subject = 'google-sub-1'}) =>
+        GoogleTokenPayload(
+          subject: subject,
+          email: email,
+          displayName: 'Google User',
+          photoUrl: 'https://example.com/p.png',
+          emailVerified: true,
+          expiresAt: DateTime.now().toUtc().add(const Duration(hours: 1)),
+        );
+
+    test('links Google to an existing email/password account instead of crashing',
+        () async {
+      // Un compte gymtrack existe déjà avec cet email (cas du testeur : 500).
+      await post('/auth/register', {
+        'email': 'collide@example.com',
+        'password': 'password123',
+      });
+
+      // Le login Google sur le même email doit rattacher, pas violer UNIQUE(email).
+      final session = backend.userRepository
+          .signInWithGoogle(payload('collide@example.com'));
+
+      expect(session.user.email, 'collide@example.com');
+      expect(session.accessToken, isA<String>());
+
+      // Un second login Google (même subject) réutilise le même compte.
+      final again = backend.userRepository
+          .signInWithGoogle(payload('collide@example.com'));
+      expect(again.user.id, session.user.id);
+    });
+
+    test('creates a fresh account when the email is unknown', () async {
+      final session = backend.userRepository
+          .signInWithGoogle(payload('brandnew@example.com', subject: 'sub-new'));
+      expect(session.user.email, 'brandnew@example.com');
     });
   });
 

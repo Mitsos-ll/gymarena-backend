@@ -29,11 +29,23 @@ class UserRepository {
 
   ApiSession signInWithGoogle(GoogleTokenPayload google) {
     final now = dbNow();
-    final existingUserId = _findUserIdByGoogleSubject(google.subject);
-    if (existingUserId == null) {
-      return _createNewUserSession(google, now);
+
+    final linkedUserId = _findUserIdByGoogleSubject(google.subject);
+    if (linkedUserId != null) {
+      return _reuseExistingUserSession(linkedUserId, google, now);
     }
-    return _reuseExistingUserSession(existingUserId, google, now);
+
+    // Aucun compte Google lié à ce subject : un utilisateur peut néanmoins déjà
+    // exister avec cet email (inscription gymtrack email/mdp, ou compte antérieur).
+    // On rattache le provider Google au user existant plutôt que d'insérer un
+    // doublon — sinon violation UNIQUE(users.email).
+    final existingByEmail = _getUserByEmail(google.email);
+    if (existingByEmail != null) {
+      _linkGoogleAccount(existingByEmail.id, google, now);
+      return _reuseExistingUserSession(existingByEmail.id, google, now);
+    }
+
+    return _createNewUserSession(google, now);
   }
 
   // ── Registration / Login ────────────────────────────────────────────────────
@@ -208,6 +220,19 @@ class UserRepository {
   String _generateResetCode() =>
       _random.nextInt(1000000).toString().padLeft(6, '0');
 
+  // ── Suppression de compte ─────────────────────────────────────────────────
+
+  /// Supprime définitivement le compte associé à [accessToken] et toutes ses
+  /// données (workouts, programmes, partages, liens coach/athlète...) via les
+  /// contraintes ON DELETE CASCADE déclarées sur users(id). Irréversible.
+  void deleteAccount(String accessToken) {
+    final sessionRow = _findActiveSessionByAccessToken(accessToken);
+    if (sessionRow == null) throw ApiException('Unauthorized.', statusCode: 401);
+
+    final userId = sessionRow['user_id'] as String;
+    _database.raw.execute('DELETE FROM users WHERE id = ?', [userId]);
+  }
+
   // ── Sessions ────────────────────────────────────────────────────────────────
 
   ApiSession getSessionByAccessToken(String accessToken) {
@@ -326,6 +351,21 @@ class UserRepository {
 
     _insertSession(userId: userId, tokens: tokens, now: now);
     return _buildSession(userId, tokens.accessToken, tokens.refreshToken);
+  }
+
+  /// Rattache un provider Google à un utilisateur existant (trouvé par email).
+  /// Idempotent : si une ligne `google` existe déjà pour ce user, on met à jour
+  /// le subject/email au lieu de violer UNIQUE(user_id, provider).
+  void _linkGoogleAccount(String userId, GoogleTokenPayload google, String now) {
+    _database.raw.execute(
+      'INSERT INTO user_auth_accounts '
+      '(user_id, provider, provider_subject, email, email_verified, created_at, updated_at) '
+      "VALUES (?, 'google', ?, ?, ?, ?, ?) "
+      'ON CONFLICT(user_id, provider) DO UPDATE SET '
+      'provider_subject=excluded.provider_subject, email=excluded.email, '
+      'email_verified=excluded.email_verified, updated_at=excluded.updated_at',
+      [userId, google.subject, google.email, google.emailVerified ? 1 : 0, now, now],
+    );
   }
 
   ApiSession _reuseExistingUserSession(

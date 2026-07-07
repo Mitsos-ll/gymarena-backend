@@ -82,6 +82,22 @@ class MeRoutes {
     }
   }
 
+  Future<Response> deleteAccount(Request request) async {
+    try {
+      final bearer = bearerToken(request);
+      if (bearer == null || bearer.isEmpty) {
+        throw ApiException('Unauthorized.', statusCode: 401);
+      }
+
+      _userRepository.deleteAccount(bearer);
+      return jsonResponse({'success': true});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    } catch (e) {
+      return errorResponse('Unexpected account deletion error: $e', statusCode: 500);
+    }
+  }
+
   double? _doubleOrNull(dynamic value) {
     if (value == null) return null;
     final text = value.toString().trim();

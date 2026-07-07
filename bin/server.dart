@@ -13,6 +13,7 @@ Future<void> main(List<String> args) async {
   logInfo('Starting GymTrack backend', extra: {'env': config.env, 'port': config.port});
 
   final backend = GymTrackBackend(config);
+  await backend.bootstrapExerciseCatalog();
 
   final server = await shelf_io.serve(
     backend.handler,

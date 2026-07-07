@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
@@ -10,16 +11,20 @@ import 'db/app_database.dart';
 import 'middleware/cors_middleware.dart';
 import 'middleware/rate_limit_middleware.dart';
 import 'middleware/request_id_middleware.dart';
+import 'repositories/exercise_catalog_repository.dart';
 import 'repositories/user_repository.dart';
 import 'routes/admin_routes.dart';
 import 'routes/auth_routes.dart';
 import 'routes/coach_routes.dart';
+import 'routes/exercise_catalog_routes.dart';
 import 'routes/invite_routes.dart';
 import 'routes/me_routes.dart';
 import 'routes/sync_routes.dart';
 import 'services/email_service.dart';
+import 'services/gif_cache_service.dart';
 import 'services/google_token_service.dart';
 import 'services/session_service.dart';
+import 'services/workoutx_service.dart';
 import 'utils/http_json.dart';
 import 'utils/logger.dart';
 
@@ -64,6 +69,69 @@ class GymTrackBackend {
     );
     inviteRoutes = InviteRoutes(userRepository: userRepository, database: database);
     syncRoutes = SyncRoutes(userRepository: userRepository, database: database);
+    exerciseCatalogRepository = ExerciseCatalogRepository(database: database);
+    workoutXService = WorkoutXService(
+      apiKey: config.workoutXApiKey,
+      baseUrl: config.workoutXBaseUrl,
+    );
+    gifCacheService = GifCacheService(
+      // Sur le volume persistant (même dossier que la DB) — pas un
+      // chemin relatif au binaire, qui serait perdu à chaque déploiement.
+      cacheDir: Directory(p.join(p.dirname(config.databasePath), 'exercise_gifs')),
+      workoutX: workoutXService,
+    );
+    exerciseCatalogRoutes = ExerciseCatalogRoutes(
+      repository: exerciseCatalogRepository,
+      adminSecret: config.adminSecret,
+      gifCache: gifCacheService,
+    );
+  }
+
+  /// Copie les GIFs et métadonnées bundlés dans l'image (voir seed/) vers le
+  /// volume persistant, si absents. Idempotent — sans effet après le premier
+  /// démarrage sur un volume déjà peuplé. Évite de re-consommer le quota
+  /// WorkoutX pour propager les données déjà récupérées en dev vers un
+  /// nouvel environnement (prod).
+  Future<void> bootstrapExerciseCatalog() async {
+    gifCacheService.ensureCacheDir();
+
+    final seedGifsDir = Directory('seed/gifs');
+    if (seedGifsDir.existsSync()) {
+      var copied = 0;
+      for (final entity in seedGifsDir.listSync()) {
+        if (entity is! File) continue;
+        final fileName = p.basename(entity.path);
+        final target = File(p.join(gifCacheService.cacheDir.path, fileName));
+        if (!target.existsSync()) {
+          await entity.copy(target.path);
+          copied++;
+        }
+      }
+      if (copied > 0) {
+        logInfo('Bootstrap: copied $copied GIF(s) to persistent volume');
+      }
+    }
+
+    final seedCatalogFile = File('seed/exercise_catalog_export.json');
+    if (exerciseCatalogRepository.count() == 0 && seedCatalogFile.existsSync()) {
+      final rows = jsonDecode(await seedCatalogFile.readAsString()) as List;
+      for (final row in rows) {
+        final r = row as Map<String, dynamic>;
+        exerciseCatalogRepository.upsert(
+          slug: r['slug'] as String,
+          workoutXId: r['workoutXId'] as String,
+          name: r['name'] as String,
+          targetMuscles: (r['targetMuscles'] as List).map((e) => e.toString()).toList(),
+          secondaryMuscles: (r['secondaryMuscles'] as List).map((e) => e.toString()).toList(),
+          equipment: r['equipment'] as String?,
+          difficulty: r['difficulty'] as String?,
+          instructions: (r['instructions'] as List).map((e) => e.toString()).toList(),
+          gifPath: r['gifPath'] as String?,
+          cachedAt: r['cachedAt'] as String?,
+        );
+      }
+      logInfo('Bootstrap: imported ${rows.length} exercise_catalog row(s)');
+    }
   }
 
   final AppConfig config;
@@ -80,6 +148,10 @@ class GymTrackBackend {
   late final CoachRoutes coachRoutes;
   late final InviteRoutes inviteRoutes;
   late final SyncRoutes syncRoutes;
+  late final ExerciseCatalogRepository exerciseCatalogRepository;
+  late final WorkoutXService workoutXService;
+  late final GifCacheService gifCacheService;
+  late final ExerciseCatalogRoutes exerciseCatalogRoutes;
 
   Handler get handler {
     final router = Router();
@@ -98,6 +170,7 @@ class GymTrackBackend {
     router.get('/me', meRoutes.getMe);
     router.put('/me/profile', meRoutes.upsertProfile);
     router.put('/me/fitness-goal', meRoutes.updateFitnessGoal);
+    router.delete('/me', meRoutes.deleteAccount);
 
     // ── Admin ──────────────────────────────────────────────────────────────
     router.put('/admin/users/<userId>/set-coach', adminRoutes.setCoach);
@@ -173,6 +246,13 @@ class GymTrackBackend {
     router.get('/community/friends/shares', syncRoutes.getFriendsShares);
     router.get('/community/friends/<friendUserId>/exercise-stats', syncRoutes.getFriendExerciseStats);
 
+    // ── Catalogue d'exercices par défaut (GIFs) ─────────────────────────────
+    router.get('/exercises/catalog', exerciseCatalogRoutes.getAll);
+    router.get('/exercises/catalog/search', exerciseCatalogRoutes.search);
+    router.get('/exercises/catalog/<slug>', exerciseCatalogRoutes.getBySlug);
+    router.get('/exercise-gifs/<filename>', exerciseCatalogRoutes.serveGif);
+    router.post('/admin/exercises/import', exerciseCatalogRoutes.importCatalog);
+
     return const Pipeline()
         .addMiddleware(requestIdMiddleware())
         .addMiddleware(corsMiddleware(config.corsAllowedOrigins))
@@ -225,6 +305,7 @@ class GymTrackBackend {
 
   Future<void> close() async {
     googleTokenService.close();
+    workoutXService.close();
     database.close();
   }
 }

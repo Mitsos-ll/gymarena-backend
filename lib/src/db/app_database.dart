@@ -480,6 +480,8 @@ class AppDatabase {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
     ''');
+    _addColumnIfMissing('community_profiles', 'total_prs', 'INTEGER NOT NULL DEFAULT 0');
+    _addColumnIfMissing('community_profiles', 'badge_ids', "TEXT NOT NULL DEFAULT '[]'");
 
     _db.execute('''
       CREATE TABLE IF NOT EXISTS social_relations (
@@ -527,6 +529,28 @@ class AppDatabase {
       );
     ''');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_pshares_owner ON program_shares(owner_user_id);');
+
+    // ── Catalogue d'exercices par défaut (GIFs WorkoutX) ────────────────────
+    // Table globale en lecture seule, distincte de `exercises` (custom par
+    // utilisateur, avec sync) — un seul jeu de données partagé par tous.
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS exercise_catalog (
+        slug TEXT PRIMARY KEY,
+        workoutx_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        target_muscles TEXT NOT NULL DEFAULT '[]',
+        secondary_muscles TEXT NOT NULL DEFAULT '[]',
+        equipment TEXT,
+        difficulty TEXT,
+        instructions TEXT NOT NULL DEFAULT '[]',
+        gif_path TEXT,
+        cached_at TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    ''');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_exercise_catalog_workoutx_id ON exercise_catalog(workoutx_id);');
   }
 
   void _addColumnIfMissing(String table, String column, String definition) {

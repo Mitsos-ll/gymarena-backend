@@ -24,6 +24,11 @@ WORKDIR /app
 
 COPY --from=builder /app/bin/server ./bin/server
 
+# Données de bootstrap (GIFs + métadonnées) copiées vers le volume persistant
+# au premier démarrage — voir GymTrackBackend._bootstrapExerciseCatalog.
+COPY --from=builder /app/seed/gifs ./seed/gifs
+COPY --from=builder /app/seed/exercise_catalog_export.json ./seed/exercise_catalog_export.json
+
 # Répertoire pour la base SQLite montée en volume
 RUN mkdir -p data
 

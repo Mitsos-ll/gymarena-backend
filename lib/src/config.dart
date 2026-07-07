@@ -16,6 +16,8 @@ class AppConfig {
     required this.adminSecret,
     required this.resendApiKey,
     required this.resendFromEmail,
+    required this.workoutXApiKey,
+    required this.workoutXBaseUrl,
   });
 
   final int port;
@@ -32,6 +34,8 @@ class AppConfig {
   final String adminSecret;
   final String resendApiKey;
   final String resendFromEmail;
+  final String workoutXApiKey;
+  final String workoutXBaseUrl;
 
   bool get isProduction => env == 'production';
 
@@ -70,6 +74,8 @@ class AppConfig {
       adminSecret: require('ADMIN_SECRET'),
       resendApiKey: get('RESEND_API_KEY', ''),
       resendFromEmail: get('RESEND_FROM_EMAIL', 'onboarding@resend.dev'),
+      workoutXApiKey: get('WORKOUTX_API_KEY', ''),
+      workoutXBaseUrl: get('WORKOUTX_BASE_URL', 'https://api.workoutxapp.com/v1'),
     );
   }
 }

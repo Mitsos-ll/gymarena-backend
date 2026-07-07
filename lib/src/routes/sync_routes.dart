@@ -262,6 +262,8 @@ class SyncRoutes {
           'currentStreak': communityRows.first['current_streak'],
           'totalWorkouts': communityRows.first['total_workouts'],
           'totalVolumeKg': communityRows.first['total_volume_kg'],
+          'totalPrs': communityRows.first['total_prs'],
+          'badgeIds': communityRows.first['badge_ids'],
           'privacyJson': jsonDecode(communityRows.first['privacy_json'] as String? ?? '{}'),
         },
         'relations': relations.map((r) => {
@@ -790,8 +792,8 @@ class SyncRoutes {
       final now = dbNow();
 
       _db.raw.execute(
-        'INSERT OR REPLACE INTO community_profiles (user_id, display_name, avatar_preset_id, level, tier, total_xp, current_streak, total_workouts, total_volume_kg, privacy_json, updated_at) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT OR REPLACE INTO community_profiles (user_id, display_name, avatar_preset_id, level, tier, total_xp, current_streak, total_workouts, total_volume_kg, total_prs, badge_ids, privacy_json, updated_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
           userId,
           body['displayName'] ?? session.user.displayName,
@@ -802,7 +804,15 @@ class SyncRoutes {
           body['currentStreak'] ?? 0,
           body['totalWorkouts'] ?? 0,
           body['totalVolumeKg'] ?? 0,
-          jsonEncode(body['privacyJson'] ?? {}),
+          body['totalPrs'] ?? 0,
+          body['badgeIds'] ?? '[]',
+          // Le client envoie déjà privacyJson comme une chaîne JSON
+          // pré-sérialisée (CommunityPrivacySettings.toJson()) — la
+          // ré-encoder avec jsonEncode() la double-encoderait (une chaîne
+          // JSON contenant une chaîne JSON échappée au lieu de l'objet).
+          body['privacyJson'] is String
+              ? body['privacyJson'] as String
+              : jsonEncode(body['privacyJson'] ?? {}),
           now,
         ],
       );
@@ -939,7 +949,9 @@ class SyncRoutes {
 
       Map<String, dynamic> _profile(String uid) {
         final cp = _db.raw.select(
-          'SELECT display_name, avatar_preset_id, level, tier FROM community_profiles WHERE user_id=?',
+          'SELECT display_name, avatar_preset_id, level, tier, total_xp, current_streak, '
+          'total_workouts, total_volume_kg, total_prs, badge_ids, privacy_json '
+          'FROM community_profiles WHERE user_id=?',
           [uid],
         );
         final up = _db.raw.select(
@@ -955,6 +967,13 @@ class SyncRoutes {
           'avatarPresetId': cp.isNotEmpty ? (cp.first['avatar_preset_id'] ?? 'warrior') : 'warrior',
           'level': cp.isNotEmpty ? (cp.first['level'] ?? 1) : 1,
           'tier': cp.isNotEmpty ? (cp.first['tier'] ?? 'Rookie') : 'Rookie',
+          'totalXp': cp.isNotEmpty ? (cp.first['total_xp'] ?? 0) : 0,
+          'currentStreak': cp.isNotEmpty ? (cp.first['current_streak'] ?? 0) : 0,
+          'totalWorkouts': cp.isNotEmpty ? (cp.first['total_workouts'] ?? 0) : 0,
+          'totalVolumeKg': cp.isNotEmpty ? (cp.first['total_volume_kg'] ?? 0) : 0,
+          'totalPrs': cp.isNotEmpty ? (cp.first['total_prs'] ?? 0) : 0,
+          'badgeIds': cp.isNotEmpty ? (cp.first['badge_ids'] ?? '[]') : '[]',
+          'privacyJson': cp.isNotEmpty ? (cp.first['privacy_json'] ?? '{}') : '{}',
         };
       }
 

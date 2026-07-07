@@ -15,4 +15,6 @@ AppConfig testConfig() => AppConfig(
       adminSecret: 'test-admin-secret',
       resendApiKey: '',
       resendFromEmail: 'onboarding@resend.dev',
+      workoutXApiKey: 'test-workoutx-key',
+      workoutXBaseUrl: 'https://api.workoutxapp.com/v1',
     );

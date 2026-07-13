@@ -1270,6 +1270,118 @@ class SyncRoutes {
     }
   }
 
+  // ── GET /community/relations/<relationUserId>/session-detail ─────────────
+  //
+  // Dernières séances détaillées (poids/reps par série) d'une relation
+  // acceptée. Contrairement à getFriendExerciseStats (agrégats, ouvert à
+  // toute relation acceptée), ceci expose des données brutes de séance —
+  // en plus de la relation acceptée, il faut donc que le propriétaire ait
+  // explicitement autorisé ce type de relation via
+  // CommunityPrivacySettings.sessionDetailVisibleTo (stocké dans
+  // community_profiles.privacy_json), sinon 403.
+
+  Future<Response> getRelationSessionDetail(
+      Request request, String relationUserId) async {
+    try {
+      final session = requireAuth(request, _repo);
+      final userId = session.user.id;
+
+      final relationRows = _db.raw.select(
+        "SELECT status FROM social_relations WHERE ((user_id_a=? AND user_id_b=?) OR (user_id_a=? AND user_id_b=?)) AND request_status='accepted' LIMIT 1",
+        [userId, relationUserId, relationUserId, userId],
+      );
+      if (relationRows.isEmpty) {
+        throw ApiException('Not authorized to view this athlete.', statusCode: 403);
+      }
+      final relationStatus = relationRows.first['status'] as String;
+
+      final profileRows = _db.raw.select(
+        'SELECT display_name, privacy_json FROM community_profiles WHERE user_id=? LIMIT 1',
+        [relationUserId],
+      );
+      if (profileRows.isEmpty) {
+        throw ApiException('Not authorized to view this athlete.', statusCode: 403);
+      }
+      final displayName = profileRows.first['display_name'] as String? ?? 'Athlète';
+
+      var allowedRelations = const <dynamic>[];
+      try {
+        final privacyRaw = profileRows.first['privacy_json'] as String? ?? '{}';
+        var decoded = jsonDecode(privacyRaw);
+        if (decoded is String) decoded = jsonDecode(decoded);
+        if (decoded is Map<String, dynamic>) {
+          allowedRelations =
+              decoded['sessionDetailVisibleTo'] as List<dynamic>? ?? const [];
+        }
+      } catch (_) {
+        // privacy_json corrompu — on retombe sur "rien d'autorisé" (fail-closed).
+      }
+      if (!allowedRelations.contains(relationStatus)) {
+        throw ApiException('Not authorized to view this athlete.', statusCode: 403);
+      }
+
+      final workoutRows = _db.raw.select(
+        "SELECT id, workout_date FROM workouts WHERE user_id=? AND end_time IS NOT NULL ORDER BY workout_date DESC LIMIT 3",
+        [relationUserId],
+      );
+
+      final recentWorkouts = <Map<String, dynamic>>[];
+      for (final w in workoutRows) {
+        final workoutId = w['id'] as String;
+        final exerciseRows = _db.raw.select(
+          'SELECT we.id, we.exercise_order, COALESCE(we.exercise_name_snapshot, e.name, we.exercise_id) as name, '
+          'ws.set_number, ws.weight_kg, ws.reps, ws.rpe '
+          'FROM workout_exercises we '
+          'LEFT JOIN exercises e ON e.id = we.exercise_id '
+          'LEFT JOIN workout_sets ws ON ws.workout_exercise_id = we.id '
+          'WHERE we.workout_id=? ORDER BY we.exercise_order, ws.set_number',
+          [workoutId],
+        );
+
+        // Regroupe par workout_exercise (we.id) — un exercice peut apparaître
+        // deux fois dans la même séance (ex: superset), il ne faut donc pas
+        // dédupliquer par nom (même logique que getAthleteDetail côté coach).
+        final exercisesById = <String, Map<String, dynamic>>{};
+        final exerciseOrder = <String>[];
+        for (final e in exerciseRows) {
+          final weId = e['id'] as String;
+          if (!exercisesById.containsKey(weId)) {
+            exerciseOrder.add(weId);
+            exercisesById[weId] = {
+              'name': e['name'] as String? ?? 'Exercice',
+              'sets': <Map<String, dynamic>>[],
+            };
+          }
+          final weight = (e['weight_kg'] as num?)?.toDouble();
+          final reps = e['reps'] as int?;
+          if (weight != null && reps != null) {
+            (exercisesById[weId]!['sets'] as List<Map<String, dynamic>>).add({
+              'setNumber': e['set_number'],
+              'weightKg': weight,
+              'reps': reps,
+              'rpe': (e['rpe'] as num?)?.toDouble(),
+            });
+          }
+        }
+        final exercises = exerciseOrder.map((id) => exercisesById[id]!).toList();
+
+        recentWorkouts.add({
+          'workoutId': workoutId,
+          'workoutDate': w['workout_date'],
+          'exercises': exercises,
+        });
+      }
+
+      return jsonResponse({
+        'athleteUserId': relationUserId,
+        'displayName': displayName,
+        'recentWorkouts': recentWorkouts,
+      });
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
   // ── DELETE /community/shares/workout/:shareId ────────────────────────────
 
   Future<Response> deleteWorkoutShare(Request request, String shareId) async {

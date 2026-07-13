@@ -265,6 +265,7 @@ class GymTrackBackend {
     router.get('/community/relations', syncRoutes.getRelations);
     router.get('/community/friends/shares', syncRoutes.getFriendsShares);
     router.get('/community/friends/<friendUserId>/exercise-stats', syncRoutes.getFriendExerciseStats);
+    router.get('/community/relations/<relationUserId>/session-detail', syncRoutes.getRelationSessionDetail);
 
     // ── Catalogue d'exercices par défaut (GIFs) ─────────────────────────────
     router.get('/exercises/catalog', exerciseCatalogRoutes.getAll);

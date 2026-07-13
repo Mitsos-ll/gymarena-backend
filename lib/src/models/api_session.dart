@@ -10,7 +10,10 @@ class ApiSession {
   });
 
   final String accessToken;
-  final String refreshToken;
+  // null quand la réponse ne peut pas réémettre le refresh token en clair
+  // (ex: getSessionByAccessToken — seul son hash est connu côté serveur).
+  // Le client doit alors conserver son propre refreshToken existant.
+  final String? refreshToken;
   final ApiUser user;
   final ApiProfile? profile;
 

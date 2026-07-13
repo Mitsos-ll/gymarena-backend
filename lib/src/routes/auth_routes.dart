@@ -5,6 +5,7 @@ import '../repositories/user_repository.dart';
 import '../services/email_service.dart';
 import '../services/google_token_service.dart';
 import '../utils/api_exception.dart';
+import '../utils/client_ip.dart';
 import '../utils/http_json.dart';
 import '../utils/validator.dart';
 
@@ -43,6 +44,7 @@ class AuthRoutes {
       _enforceAuthLimit(request);
       final body = await readJsonBody(request);
       final email = validateEmail(body['email']?.toString());
+      _enforceAuthLimit(request, accountKey: email);
       final password = validatePassword(body['password']?.toString());
       final displayName =
           validateDisplayName(body['displayName']?.toString(), required: false);
@@ -63,6 +65,11 @@ class AuthRoutes {
       _enforceAuthLimit(request);
       final body = await readJsonBody(request);
       final email = validateEmail(body['email']?.toString());
+      // Limite dédiée par compte ciblé, en plus de la limite par IP : une
+      // IP falsifiée (X-Forwarded-For) ne suffit plus à elle seule à
+      // contourner la protection contre le credential-stuffing sur un email
+      // donné.
+      _enforceAuthLimit(request, accountKey: email);
       // Login: skip complexity check — user may have an old password
       final password =
           validatePassword(body['password']?.toString(), skipComplexity: true);
@@ -107,6 +114,7 @@ class AuthRoutes {
       _enforceAuthLimit(request);
       final body = await readJsonBody(request);
       final email = validateEmail(body['email']?.toString());
+      _enforceAuthLimit(request, accountKey: email);
 
       final result = _userRepository.requestPasswordReset(email);
       if (result.email != null && result.code != null) {
@@ -132,6 +140,10 @@ class AuthRoutes {
       _enforceAuthLimit(request);
       final body = await readJsonBody(request);
       final email = validateEmail(body['email']?.toString());
+      // Le point le plus sensible au bruteforce (code à 6 chiffres) : la
+      // limite par IP seule est contournable en falsifiant X-Forwarded-For,
+      // celle par compte ne l'est pas.
+      _enforceAuthLimit(request, accountKey: email);
       final code = validateResetCode(body['code']?.toString());
       final newPassword = validatePassword(body['newPassword']?.toString());
 
@@ -147,11 +159,17 @@ class AuthRoutes {
     }
   }
 
-  void _enforceAuthLimit(Request request) {
-    final ip = request.headers['x-forwarded-for']?.split(',').first.trim() ??
-        request.headers['x-real-ip'] ??
-        'unknown';
-    if (!_authLimiter.allow(ip)) {
+  /// Applique la limite par IP, et si [accountKey] (email) est fourni, une
+  /// seconde limite indépendante par compte ciblé — préfixées pour ne jamais
+  /// collisionner dans le même bucket store.
+  void _enforceAuthLimit(Request request, {String? accountKey}) {
+    final ip = clientIp(request);
+    if (!_authLimiter.allow('ip:$ip')) {
+      throw ApiException('Too many auth attempts. Please slow down.',
+          statusCode: 429);
+    }
+    if (accountKey != null &&
+        !_authLimiter.allow('acct:${accountKey.toLowerCase()}')) {
       throw ApiException('Too many auth attempts. Please slow down.',
           statusCode: 429);
     }

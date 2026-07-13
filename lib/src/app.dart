@@ -49,6 +49,15 @@ class GymTrackBackend {
         _authLimiter = RateLimiter(
           maxRequests: config.authRateLimitMaxRequests,
           windowDuration: Duration(seconds: config.authRateLimitWindowSeconds),
+        ),
+        // Rate-limit dédié pour /admin/* — plus strict que le global, distinct
+        // de l'auth. Les endpoints admin protègent des opérations à fort
+        // impact (dump de données, suppression de masse) derrière un unique
+        // secret statique ; un rate-limit spécifique ralentit toute tentative
+        // de force brute sur ce secret indépendamment du trafic global.
+        _adminLimiter = RateLimiter(
+          maxRequests: 20,
+          windowDuration: const Duration(seconds: 60),
         ) {
     userRepository = UserRepository(
       database: database,
@@ -61,7 +70,11 @@ class GymTrackBackend {
       emailService: emailService,
     );
     meRoutes = MeRoutes(userRepository: userRepository);
-    adminRoutes = AdminRoutes(database: database, adminSecret: config.adminSecret);
+    adminRoutes = AdminRoutes(
+      database: database,
+      adminSecret: config.adminSecret,
+      adminLimiter: _adminLimiter,
+    );
     coachRoutes = CoachRoutes(
       userRepository: userRepository,
       database: database,
@@ -141,6 +154,7 @@ class GymTrackBackend {
   final EmailService emailService;
   final RateLimiter _globalLimiter;
   final RateLimiter _authLimiter;
+  final RateLimiter _adminLimiter;
   late final UserRepository userRepository;
   late final AuthRoutes authRoutes;
   late final MeRoutes meRoutes;
@@ -180,10 +194,16 @@ class GymTrackBackend {
     router.get('/admin/users/<userId>/programs', adminRoutes.listUserPrograms);
     router.delete('/admin/users/<userId>/programs', adminRoutes.deleteAllUserPrograms);
     router.delete('/admin/users/<userId>/exercises', adminRoutes.deleteAllUserExercises);
-    router.get('/admin/users/<userId>/debug-sync', adminRoutes.debugUserSync);
-    router.get('/admin/debug-users', adminRoutes.debugListUsers);
-    router.get('/admin/debug-workouts/<workoutId>', adminRoutes.debugWorkoutDetail);
-    router.get('/admin/users/<userId>/debug-name', adminRoutes.debugDisplayName);
+
+    // Endpoints de diagnostic pur (pas d'usage opérationnel légitime en
+    // production) — désactivés hors dev/staging pour réduire la surface
+    // d'exposition de données personnelles en cas de fuite du secret admin.
+    if (!config.isProduction) {
+      router.get('/admin/users/<userId>/debug-sync', adminRoutes.debugUserSync);
+      router.get('/admin/debug-users', adminRoutes.debugListUsers);
+      router.get('/admin/debug-workouts/<workoutId>', adminRoutes.debugWorkoutDetail);
+      router.get('/admin/users/<userId>/debug-name', adminRoutes.debugDisplayName);
+    }
 
     // ── Coach ──────────────────────────────────────────────────────────────
     router.post('/coach/invite-codes', coachRoutes.generateInviteCode);

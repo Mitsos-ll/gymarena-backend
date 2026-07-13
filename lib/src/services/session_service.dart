@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:crypto/crypto.dart';
+import '../utils/token_hash.dart' as token_hash;
 
 class SessionTokens {
   SessionTokens({
@@ -46,9 +46,7 @@ class SessionService {
     );
   }
 
-  String hashToken(String token) {
-    return sha256.convert(utf8.encode(token)).toString();
-  }
+  String hashToken(String token) => token_hash.hashToken(token);
 
   String _randomToken() {
     final bytes = List<int>.generate(48, (_) => _random.nextInt(256));

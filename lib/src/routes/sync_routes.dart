@@ -48,11 +48,28 @@ class SyncRoutes {
       for (final w in workouts) {
         final workoutId = w['id'] as String;
         final exercises = _db.raw.select(
-          'SELECT we.*, ws.id as ws_id, ws.set_number, ws.weight_kg, ws.reps, ws.volume_reps, ws.rpe, ws.rest_time_seconds, ws.estimated_1rm, ws.set_type '
+          'SELECT we.*, ws.id as ws_id, ws.set_number, ws.weight_kg, ws.reps, ws.volume_reps, ws.rpe, ws.rest_time_seconds, ws.estimated_1rm, ws.bodyweight_kg, ws.added_weight_kg, ws.set_type '
           'FROM workout_exercises we LEFT JOIN workout_sets ws ON ws.workout_exercise_id=we.id '
           'WHERE we.workout_id=? ORDER BY we.exercise_order, ws.set_number',
           [workoutId],
         );
+
+        final setSides = _db.raw.select(
+          'SELECT wss.* FROM workout_set_sides wss '
+          'JOIN workout_sets ws ON ws.id = wss.workout_set_id '
+          'JOIN workout_exercises we ON we.id = ws.workout_exercise_id '
+          'WHERE we.workout_id=?',
+          [workoutId],
+        );
+        final sidesBySetId = <String, List<Map<String, dynamic>>>{};
+        for (final row in setSides) {
+          final setId = row['workout_set_id'] as String;
+          (sidesBySetId[setId] ??= []).add({
+            'side': row['side'],
+            'reps': row['reps'],
+            'rpe': row['rpe'],
+          });
+        }
 
         final exerciseMap = <String, Map<String, dynamic>>{};
         for (final row in exercises) {
@@ -65,8 +82,9 @@ class SyncRoutes {
             'sets': <Map<String, dynamic>>[],
           });
           if (row['ws_id'] != null) {
+            final wsId = row['ws_id'] as String;
             (exerciseMap[weId]!['sets'] as List).add({
-              'id': row['ws_id'],
+              'id': wsId,
               'setNumber': row['set_number'],
               'weightKg': row['weight_kg'],
               'reps': row['reps'],
@@ -74,7 +92,10 @@ class SyncRoutes {
               'rpe': row['rpe'],
               'restTimeSeconds': row['rest_time_seconds'],
               'estimated1Rm': row['estimated_1rm'],
+              'bodyweightKg': row['bodyweight_kg'],
+              'addedWeightKg': row['added_weight_kg'],
               'setType': row['set_type'],
+              'sides': sidesBySetId[wsId] ?? const [],
             });
           }
         }
@@ -337,10 +358,18 @@ class SyncRoutes {
           for (final s in sets) {
             final wsId = _uuid.v4();
             _db.raw.execute(
-              'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, volume_reps, rpe, rest_time_seconds, estimated_1rm, set_type, created_at) '
-              'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['volumeReps'] ?? s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['setType'] ?? 'normal', now],
+              'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, volume_reps, rpe, rest_time_seconds, estimated_1rm, bodyweight_kg, added_weight_kg, set_type, created_at) '
+              'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+              [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['volumeReps'] ?? s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['bodyweightKg'], s['addedWeightKg'], s['setType'] ?? 'normal', now],
             );
+            final sides = (s['sides'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+            for (final side in sides) {
+              _db.raw.execute(
+                'INSERT INTO workout_set_sides (id, workout_set_id, side, reps, rpe, created_at) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                [_uuid.v4(), wsId, side['side'], side['reps'] ?? 0, side['rpe'], now],
+              );
+            }
           }
         }
         ids.add(id);
@@ -393,10 +422,18 @@ class SyncRoutes {
         for (final s in sets) {
           final wsId = _uuid.v4();
           _db.raw.execute(
-            'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, rpe, rest_time_seconds, estimated_1rm, set_type, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['setType'] ?? 'normal', now],
+            'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, rpe, rest_time_seconds, estimated_1rm, bodyweight_kg, added_weight_kg, set_type, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['bodyweightKg'], s['addedWeightKg'], s['setType'] ?? 'normal', now],
           );
+          final sides = (s['sides'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+          for (final side in sides) {
+            _db.raw.execute(
+              'INSERT INTO workout_set_sides (id, workout_set_id, side, reps, rpe, created_at) '
+              'VALUES (?, ?, ?, ?, ?, ?)',
+              [_uuid.v4(), wsId, side['side'], side['reps'] ?? 0, side['rpe'], now],
+            );
+          }
         }
       }
 

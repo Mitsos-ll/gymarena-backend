@@ -1,21 +1,50 @@
 import 'package:shelf/shelf.dart';
 import '../db/app_database.dart';
+import '../middleware/rate_limit_middleware.dart';
 import '../utils/api_exception.dart';
+import '../utils/client_ip.dart';
 import '../utils/http_json.dart';
+import '../utils/logger.dart';
+import '../utils/secure_compare.dart';
 
 class AdminRoutes {
-  AdminRoutes({required this.database, required this.adminSecret});
+  AdminRoutes({
+    required this.database,
+    required this.adminSecret,
+    required RateLimiter adminLimiter,
+  }) : _adminLimiter = adminLimiter;
 
   final AppDatabase database;
   final String adminSecret;
+  final RateLimiter _adminLimiter;
 
-  Response statsHandler(Request request) {
+  /// Vérifie le rate-limit dédié puis le secret admin (comparaison à temps
+  /// constant), et journalise tout accès autorisé pour audit. Retourne une
+  /// [Response] 429/401 si la requête doit être rejetée, ou `null` si elle
+  /// peut continuer.
+  Response? _guard(Request request, String endpoint) {
+    final ip = clientIp(request);
+
+    if (!_adminLimiter.allow(ip)) {
+      return Response(429,
+          body: '{"message":"Too many admin requests."}',
+          headers: {'Content-Type': 'application/json'});
+    }
+
     final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
+    if (!constantTimeEquals(auth, 'Bearer $adminSecret')) {
       return Response(401,
           body: '{"message":"Unauthorized"}',
           headers: {'Content-Type': 'application/json'});
     }
+
+    logInfo('Admin access', extra: {'endpoint': endpoint, 'ip': ip});
+    return null;
+  }
+
+  Response statsHandler(Request request) {
+    final denied = _guard(request, 'GET /admin/stats');
+    if (denied != null) return denied;
 
     final db = database.raw;
 
@@ -66,10 +95,9 @@ class AdminRoutes {
   }
 
   Response listUserWorkouts(Request request, String userId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'GET /admin/users/<userId>/workouts');
+    if (denied != null) return denied;
+
     final db = database.raw;
     final workouts = db.select(
       'SELECT id, workout_date, duration_seconds, notes FROM workouts WHERE user_id=? ORDER BY workout_date DESC',
@@ -89,10 +117,9 @@ class AdminRoutes {
   }
 
   Response debugWorkoutDetail(Request request, String workoutId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'GET /admin/debug-workouts/<workoutId>');
+    if (denied != null) return denied;
+
     final db = database.raw;
     final rows = db.select(
       'SELECT we.id as we_id, COALESCE(e.name, we.exercise_name_snapshot) as exercise_name, '
@@ -115,30 +142,27 @@ class AdminRoutes {
   }
 
   Response deleteUserWorkout(Request request, String userId, String workoutId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'DELETE /admin/users/<userId>/workouts/<workoutId>');
+    if (denied != null) return denied;
+
     final db = database.raw;
     db.execute('DELETE FROM workouts WHERE id=? AND user_id=?', [workoutId, userId]);
     return jsonResponse({'deleted': workoutId});
   }
 
   Response deleteAllUserWorkouts(Request request, String userId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'DELETE /admin/users/<userId>/workouts');
+    if (denied != null) return denied;
+
     final db = database.raw;
     db.execute('DELETE FROM workouts WHERE user_id=?', [userId]);
     return jsonResponse({'deleted': true, 'userId': userId});
   }
 
   Response listUserPrograms(Request request, String userId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'GET /admin/users/<userId>/programs');
+    if (denied != null) return denied;
+
     final db = database.raw;
     final rows = db.select(
       'SELECT id, name, created_at FROM programs WHERE user_id=? ORDER BY name',
@@ -148,20 +172,18 @@ class AdminRoutes {
   }
 
   Response deleteAllUserPrograms(Request request, String userId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'DELETE /admin/users/<userId>/programs');
+    if (denied != null) return denied;
+
     final db = database.raw;
     db.execute('DELETE FROM programs WHERE user_id=?', [userId]);
     return jsonResponse({'deleted': true, 'userId': userId});
   }
 
   Response debugListUsers(Request request) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'GET /admin/debug-users');
+    if (denied != null) return denied;
+
     final db = database.raw;
     final users = db.select(
       'SELECT id, email, display_name FROM users WHERE is_deleted = 0 ORDER BY created_at DESC',
@@ -186,10 +208,9 @@ class AdminRoutes {
   }
 
   Response debugDisplayName(Request request, String userId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'GET /admin/users/<userId>/debug-name');
+    if (denied != null) return denied;
+
     final db = database.raw;
     final cp = db.select('SELECT display_name FROM community_profiles WHERE user_id=?', [userId]);
     final up = db.select('SELECT display_name FROM user_profiles WHERE user_id=?', [userId]);
@@ -203,10 +224,9 @@ class AdminRoutes {
   }
 
   Response debugUserSync(Request request, String userId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'GET /admin/users/<userId>/debug-sync');
+    if (denied != null) return denied;
+
     final db = database.raw;
     final profile = db.select(
       'SELECT user_id, weight_kg, height_cm, fitness_goal, updated_at FROM user_profiles WHERE user_id=?',
@@ -256,22 +276,17 @@ class AdminRoutes {
   }
 
   Response deleteAllUserExercises(Request request, String userId) {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401, body: '{"message":"Unauthorized"}', headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'DELETE /admin/users/<userId>/exercises');
+    if (denied != null) return denied;
+
     final db = database.raw;
     db.execute('DELETE FROM exercises WHERE user_id=?', [userId]);
     return jsonResponse({'deleted': true, 'userId': userId});
   }
 
   Future<Response> setCoach(Request request, String userId) async {
-    final auth = request.headers['authorization'] ?? '';
-    if (auth != 'Bearer $adminSecret') {
-      return Response(401,
-          body: '{"message":"Unauthorized"}',
-          headers: {'Content-Type': 'application/json'});
-    }
+    final denied = _guard(request, 'PUT /admin/users/<userId>/set-coach');
+    if (denied != null) return denied;
 
     try {
       final body = await readJsonBody(request);

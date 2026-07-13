@@ -739,6 +739,14 @@ class CoachRoutes {
         "UPDATE coach_athlete_links SET status='revoked', updated_at=? WHERE athlete_user_id=? AND status='active'",
         [dbNow(), athleteUserId],
       );
+      // Sans ça, coach_program_assignments reste 'active' indéfiniment et
+      // getAssignedProgram() continue de le renvoyer — le programme du
+      // coach révoqué se réapplique alors automatiquement côté athlète à
+      // chaque fois que l'état local est vidé (réinstall, nouvel appareil).
+      _db.raw.execute(
+        "UPDATE coach_program_assignments SET status='removed' WHERE athlete_user_id=? AND status='active'",
+        [athleteUserId],
+      );
 
       return Response(204);
     } on ApiException catch (e) {

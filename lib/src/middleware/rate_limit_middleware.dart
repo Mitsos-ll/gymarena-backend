@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:shelf/shelf.dart';
 
+import '../utils/client_ip.dart';
+
 /// Token-bucket rate limiter in-memory par IP (ou clé custom).
 /// Paramètres séparables par route — instanciez un limiter par groupe.
 class RateLimiter {
@@ -42,7 +44,7 @@ class RateLimiter {
   }) {
     return (Handler inner) {
       return (Request request) async {
-        final key = keyExtractor?.call(request) ?? _clientIp(request);
+        final key = keyExtractor?.call(request) ?? clientIp(request);
         if (!allow(key)) {
           return Response(
             429,
@@ -57,12 +59,6 @@ class RateLimiter {
       };
     };
   }
-}
-
-String _clientIp(Request request) {
-  return request.headers['x-forwarded-for']?.split(',').first.trim() ??
-      request.headers['x-real-ip'] ??
-      'unknown';
 }
 
 class _Bucket {

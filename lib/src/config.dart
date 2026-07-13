@@ -58,10 +58,22 @@ class AppConfig {
 
     final rawOrigins = get('CORS_ALLOWED_ORIGINS', '*');
     final corsOrigins = rawOrigins.split(',').map((s) => s.trim()).toList();
+    final env = get('ENV', 'development');
+
+    // '*' est acceptable en dev mais jamais censé atteindre la prod
+    // silencieusement — sans ce garde-fou, un déploiement qui oublie de
+    // positionner CORS_ALLOWED_ORIGINS tourne indéfiniment avec CORS
+    // grand ouvert sans que personne ne s'en aperçoive.
+    if (env == 'production' && corsOrigins.contains('*')) {
+      throw StateError(
+        'CORS_ALLOWED_ORIGINS must not be "*" in production. '
+        'Set it explicitly (comma-separated allowed origins).',
+      );
+    }
 
     return AppConfig(
       port: getInt('PORT', 3000),
-      env: get('ENV', 'development'),
+      env: env,
       databasePath: get('DATABASE_PATH', 'data/gymtrack.db'),
       googleWebClientId: require('GOOGLE_WEB_CLIENT_ID'),
       accessTokenTtlDays: getInt('ACCESS_TOKEN_TTL_DAYS', 30),

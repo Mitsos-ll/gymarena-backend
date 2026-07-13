@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
+import '../utils/token_hash.dart';
+
 class AppDatabase {
   AppDatabase._(this._db);
 
@@ -21,9 +23,11 @@ class AppDatabase {
     final instance = AppDatabase._(db);
     instance._createSchema();
     instance._migrateUserAuthAccountsIfNeeded();
+    instance._migrateAuthSessionsToHashedTokensIfNeeded();
     instance._migrateRelationsIfNeeded();
     instance._migrateCoachInviteRequestsIfNeeded();
     instance._migrateCoachProgramAssignmentsIfNeeded();
+    instance._backfillRevokedCoachProgramAssignments();
     return instance;
   }
 
@@ -75,12 +79,17 @@ class AppDatabase {
       );
     ''');
 
+    // access_token_hash/refresh_token_hash : jamais le token en clair — une
+    // fuite de la base (backup, volume compromis) ne doit pas permettre de
+    // rejouer directement une session active. Le client garde le seul
+    // exemplaire en clair (secure storage) ; le serveur ne connaît/ne
+    // compare que le hash.
     _db.execute('''
       CREATE TABLE IF NOT EXISTS auth_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT NOT NULL,
-        access_token TEXT NOT NULL UNIQUE,
-        refresh_token TEXT NOT NULL UNIQUE,
+        access_token_hash TEXT NOT NULL UNIQUE,
+        refresh_token_hash TEXT NOT NULL UNIQUE,
         device_name TEXT,
         access_expires_at TEXT NOT NULL,
         refresh_expires_at TEXT NOT NULL,
@@ -93,8 +102,8 @@ class AppDatabase {
 
     _db.execute('CREATE INDEX IF NOT EXISTS idx_user_auth_accounts_subject ON user_auth_accounts(provider, provider_subject);');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_access_token ON auth_sessions(access_token);');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_refresh_token ON auth_sessions(refresh_token);');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_access_token_hash ON auth_sessions(access_token_hash);');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_refresh_token_hash ON auth_sessions(refresh_token_hash);');
 
     // ── is_coach sur user_profiles ──────────────────────────────────────────
     _addColumnIfMissing('user_profiles', 'is_coach', 'INTEGER NOT NULL DEFAULT 0');
@@ -292,6 +301,25 @@ class AppDatabase {
     // Volume réel de la série (gauche+droite pour un exercice unilatéral) —
     // distinct de `reps` qui reste le max des deux côtés (affichage, 1RM).
     _addColumnIfMissing('workout_sets', 'volume_reps', 'INTEGER');
+    // Poids du corps / charge additionnelle (exercices bodyweight) — sans ça
+    // ces séries revenaient vides après un push/pull (reinstall, nouveau
+    // device) car jamais persistées côté serveur.
+    _addColumnIfMissing('workout_sets', 'bodyweight_kg', 'REAL');
+    _addColumnIfMissing('workout_sets', 'added_weight_kg', 'REAL');
+
+    // Détail gauche/droite pour les exercices unilatéraux — même besoin que
+    // ci-dessus, cette table n'existait pas du tout côté serveur.
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS workout_set_sides (
+        id TEXT PRIMARY KEY,
+        workout_set_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        reps INTEGER NOT NULL,
+        rpe REAL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (workout_set_id) REFERENCES workout_sets(id) ON DELETE CASCADE
+      );
+    ''');
 
     // ── Sync — Exercices custom ─────────────────────────────────────────────
     _db.execute('''
@@ -599,6 +627,27 @@ class AppDatabase {
     }
   }
 
+  /// Backfill ponctuel (idempotent, sans coût si rien à corriger) : avant le
+  /// fix de revokeCoach(), révoquer un coach ne nettoyait jamais son
+  /// assignation de programme — elle restait 'active' et se réappliquait
+  /// indéfiniment côté athlète à chaque restauration (réinstall). Nettoie
+  /// tous les cas déjà orphelins en base, pas seulement les futurs.
+  void _backfillRevokedCoachProgramAssignments() {
+    final columns = _db.select('PRAGMA table_info(coach_program_assignments);');
+    if (columns.isEmpty) return;
+    _db.execute('''
+      UPDATE coach_program_assignments
+      SET status = 'removed'
+      WHERE status = 'active'
+        AND EXISTS (
+          SELECT 1 FROM coach_athlete_links l
+          WHERE l.coach_user_id = coach_program_assignments.coach_user_id
+            AND l.athlete_user_id = coach_program_assignments.athlete_user_id
+            AND l.status = 'revoked'
+        );
+    ''');
+  }
+
   void _migrateCoachInviteRequestsIfNeeded() {
     final indexes = _db.select("PRAGMA index_list(coach_invite_requests);");
     // La table a été créée avec un UNIQUE(coach_user_id, athlete_user_id,
@@ -638,6 +687,71 @@ class AppDatabase {
         ON coach_invite_requests(coach_user_id, athlete_user_id)
         WHERE status='pending';
       ''');
+      _db.execute('COMMIT;');
+    } catch (e) {
+      _db.execute('ROLLBACK;');
+      rethrow;
+    }
+  }
+
+  /// Migre `auth_sessions` du stockage en clair (`access_token`/
+  /// `refresh_token`) vers un stockage par hash uniquement
+  /// (`access_token_hash`/`refresh_token_hash`). Transparent pour les
+  /// utilisateurs déjà connectés : on hashe la valeur en clair déjà en base
+  /// (le client garde toujours le token en clair côté secure storage), donc
+  /// une session existante reste valide après migration — pas de
+  /// déconnexion forcée.
+  void _migrateAuthSessionsToHashedTokensIfNeeded() {
+    final columns = _db.select('PRAGMA table_info(auth_sessions);');
+    if (columns.isEmpty) return;
+    final alreadyMigrated = columns.any((r) => r['name'] == 'access_token_hash');
+    if (alreadyMigrated) return;
+
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      final rows = _db.select('SELECT * FROM auth_sessions;');
+
+      _db.execute('ALTER TABLE auth_sessions RENAME TO auth_sessions_old;');
+      _db.execute('''
+        CREATE TABLE auth_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id TEXT NOT NULL,
+          access_token_hash TEXT NOT NULL UNIQUE,
+          refresh_token_hash TEXT NOT NULL UNIQUE,
+          device_name TEXT,
+          access_expires_at TEXT NOT NULL,
+          refresh_expires_at TEXT NOT NULL,
+          revoked_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      ''');
+
+      for (final row in rows) {
+        _db.execute(
+          'INSERT INTO auth_sessions '
+          '(id, user_id, access_token_hash, refresh_token_hash, device_name, access_expires_at, refresh_expires_at, revoked_at, created_at, updated_at) '
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            row['id'],
+            row['user_id'],
+            hashToken(row['access_token'] as String),
+            hashToken(row['refresh_token'] as String),
+            row['device_name'],
+            row['access_expires_at'],
+            row['refresh_expires_at'],
+            row['revoked_at'],
+            row['created_at'],
+            row['updated_at'],
+          ],
+        );
+      }
+
+      _db.execute('DROP TABLE auth_sessions_old;');
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);');
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_access_token_hash ON auth_sessions(access_token_hash);');
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_refresh_token_hash ON auth_sessions(refresh_token_hash);');
       _db.execute('COMMIT;');
     } catch (e) {
       _db.execute('ROLLBACK;');

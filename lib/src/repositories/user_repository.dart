@@ -10,6 +10,7 @@ import '../services/google_token_service.dart';
 import '../services/session_service.dart';
 import '../utils/api_exception.dart';
 import '../utils/password_hash.dart';
+import '../utils/token_hash.dart';
 
 class UserRepository {
   UserRepository({
@@ -235,6 +236,13 @@ class UserRepository {
 
   // ── Sessions ────────────────────────────────────────────────────────────────
 
+  // Le token n'étant plus jamais stocké en clair (seul son hash l'est), on
+  // ne peut plus le "relire" en base pour le renvoyer au client : accessToken
+  // vient du paramètre déjà connu de l'appelant, et refreshToken est
+  // volontairement `null` (impossible à reconstituer depuis un hash). Le
+  // client doit conserver son propre refreshToken déjà en main plutôt que
+  // d'écraser sa session stockée avec cette valeur absente — voir
+  // AuthController._preserveRefreshToken côté app.
   ApiSession getSessionByAccessToken(String accessToken) {
     final sessionRow = _findActiveSessionByAccessToken(accessToken);
     if (sessionRow == null) throw ApiException('Unauthorized.', statusCode: 401);
@@ -244,8 +252,8 @@ class UserRepository {
     if (user == null) throw ApiException('User not found.', statusCode: 404);
 
     return ApiSession(
-      accessToken: sessionRow['access_token'] as String,
-      refreshToken: sessionRow['refresh_token'] as String,
+      accessToken: accessToken,
+      refreshToken: null,
       user: user,
       profile: _findProfileByUserId(userId),
     );
@@ -399,12 +407,12 @@ class UserRepository {
   }) {
     _database.raw.execute(
       'INSERT INTO auth_sessions '
-      '(user_id, access_token, refresh_token, device_name, access_expires_at, refresh_expires_at, revoked_at, created_at, updated_at) '
+      '(user_id, access_token_hash, refresh_token_hash, device_name, access_expires_at, refresh_expires_at, revoked_at, created_at, updated_at) '
       'VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?)',
       [
         userId,
-        tokens.accessToken,
-        tokens.refreshToken,
+        tokens.accessTokenHash,
+        tokens.refreshTokenHash,
         tokens.accessExpiresAt.toIso8601String(),
         tokens.refreshExpiresAt.toIso8601String(),
         now,
@@ -502,8 +510,8 @@ class UserRepository {
 
   dynamic _findActiveSessionByAccessToken(String accessToken) {
     final rows = _database.raw.select(
-        'SELECT * FROM auth_sessions WHERE access_token=? AND revoked_at IS NULL LIMIT 1',
-        [accessToken]);
+        'SELECT * FROM auth_sessions WHERE access_token_hash=? AND revoked_at IS NULL LIMIT 1',
+        [hashToken(accessToken)]);
     if (rows.isEmpty) return null;
     final row = rows.first;
     final exp = DateTime.parse(row['access_expires_at'] as String);
@@ -513,8 +521,8 @@ class UserRepository {
 
   dynamic _findActiveSessionByRefreshToken(String refreshToken) {
     final rows = _database.raw.select(
-        'SELECT * FROM auth_sessions WHERE refresh_token=? AND revoked_at IS NULL LIMIT 1',
-        [refreshToken]);
+        'SELECT * FROM auth_sessions WHERE refresh_token_hash=? AND revoked_at IS NULL LIMIT 1',
+        [hashToken(refreshToken)]);
     if (rows.isEmpty) return null;
     return rows.first;
   }

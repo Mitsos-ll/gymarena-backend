@@ -102,8 +102,16 @@ class AppDatabase {
 
     _db.execute('CREATE INDEX IF NOT EXISTS idx_user_auth_accounts_subject ON user_auth_accounts(provider, provider_subject);');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_access_token_hash ON auth_sessions(access_token_hash);');
-    _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_refresh_token_hash ON auth_sessions(refresh_token_hash);');
+    // Sur une base existante (pré-hash), `CREATE TABLE IF NOT EXISTS`
+    // ci-dessus est un no-op puisque auth_sessions existe déjà avec l'ancien
+    // schéma (access_token/refresh_token) — access_token_hash n'existe pas
+    // encore à ce stade, la migration qui l'ajoute ne tourne qu'après
+    // _createSchema(). Sans ce garde, ces deux index crashaient le
+    // démarrage en boucle sur toute base déjà peuplée.
+    if (_columnExists('auth_sessions', 'access_token_hash')) {
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_access_token_hash ON auth_sessions(access_token_hash);');
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_auth_sessions_refresh_token_hash ON auth_sessions(refresh_token_hash);');
+    }
 
     // ── is_coach sur user_profiles ──────────────────────────────────────────
     _addColumnIfMissing('user_profiles', 'is_coach', 'INTEGER NOT NULL DEFAULT 0');
@@ -582,11 +590,13 @@ class AppDatabase {
   }
 
   void _addColumnIfMissing(String table, String column, String definition) {
+    if (_columnExists(table, column)) return;
+    _db.execute('ALTER TABLE $table ADD COLUMN $column $definition;');
+  }
+
+  bool _columnExists(String table, String column) {
     final cols = _db.select('PRAGMA table_info($table);');
-    final exists = cols.any((r) => r['name'] == column);
-    if (!exists) {
-      _db.execute('ALTER TABLE $table ADD COLUMN $column $definition;');
-    }
+    return cols.any((r) => r['name'] == column);
   }
 
   void _migrateCoachProgramAssignmentsIfNeeded() {

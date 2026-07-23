@@ -174,6 +174,7 @@ class GymTrackBackend {
     router.get('/admin/stats', adminRoutes.statsHandler);
 
     router.post('/auth/google', authRoutes.signInGoogle);
+    router.get('/auth/display-name-available', authRoutes.checkDisplayNameAvailable);
     router.post('/auth/register', authRoutes.register);
     router.post('/auth/login', authRoutes.login);
     router.post('/auth/refresh', authRoutes.refresh);
@@ -259,6 +260,7 @@ class GymTrackBackend {
     router.delete('/community/shares/workout/<shareId>', syncRoutes.deleteWorkoutShare);
     router.post('/community/shares/program', syncRoutes.pushProgramShare);
     router.delete('/community/shares/program/<shareId>', syncRoutes.deleteProgramShare);
+    router.get('/community/users/lookup', syncRoutes.lookupUserByDisplayName);
     router.post('/community/relations', syncRoutes.pushRelation);
     router.patch('/community/relations/<relationId>', syncRoutes.patchRelation);
     router.delete('/community/relations/<relationId>', syncRoutes.deleteRelation);

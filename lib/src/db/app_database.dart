@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
+import '../utils/logger.dart';
 import '../utils/token_hash.dart';
 
 class AppDatabase {
@@ -28,6 +29,8 @@ class AppDatabase {
     instance._migrateCoachInviteRequestsIfNeeded();
     instance._migrateCoachProgramAssignmentsIfNeeded();
     instance._backfillRevokedCoachProgramAssignments();
+    instance._migrateDisplayNameUniquenessIfNeeded();
+    instance._reconcileUserProfileDisplayNameMismatchIfNeeded();
     return instance;
   }
 
@@ -116,6 +119,9 @@ class AppDatabase {
     // ── is_coach sur user_profiles ──────────────────────────────────────────
     _addColumnIfMissing('user_profiles', 'is_coach', 'INTEGER NOT NULL DEFAULT 0');
     _addColumnIfMissing('user_profiles', 'fitness_goal', 'TEXT');
+
+    // ── display_name_normalized sur users (unicité du pseudo) ───────────────
+    _addColumnIfMissing('users', 'display_name_normalized', 'TEXT');
 
     // ── Coach ───────────────────────────────────────────────────────────────
     _db.execute('''
@@ -698,6 +704,144 @@ class AppDatabase {
         WHERE status='pending';
       ''');
       _db.execute('COMMIT;');
+    } catch (e) {
+      _db.execute('ROLLBACK;');
+      rethrow;
+    }
+  }
+
+  /// Rend `users.display_name` unique (insensible à la casse ET aux
+  /// accents) via la colonne calculée `display_name_normalized` ajoutée dans
+  /// `_createSchema()` : `LOWER()` de SQLite est ASCII-only ("École" !=
+  /// "école"), contrairement à `String.toLowerCase()` de Dart — l'unicité
+  /// doit donc être vérifiée/indexée côté Dart, pas via `LOWER(display_name)`
+  /// directement en SQL. Rien n'empêchait les doublons jusqu'ici (deux
+  /// comptes Google au même nom, deux emails à partie locale identique...),
+  /// donc une base existante peut déjà en contenir : on les dédoublonne par
+  /// suffixe numérique (le compte le plus ancien garde son nom tel quel)
+  /// avant de poser l'index unique, sinon sa création échouerait.
+  void _migrateDisplayNameUniquenessIfNeeded() {
+    final indexes = _db.select('PRAGMA index_list(users);');
+    final alreadyMigrated =
+        indexes.any((r) => r['name'] == 'idx_users_display_name_normalized');
+    if (alreadyMigrated) return;
+
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      final rows = _db.select(
+        'SELECT id, display_name FROM users WHERE is_deleted = 0 ORDER BY created_at ASC, id ASC;',
+      );
+      final takenKeys = <String>{};
+      final now = dbNow();
+      var renamedCount = 0;
+
+      for (final row in rows) {
+        final id = row['id'] as String;
+        final original = (row['display_name'] as String).trim();
+        final base = original.isEmpty ? 'Athlète' : original;
+        var candidate = base;
+        var key = candidate.toLowerCase();
+
+        if (takenKeys.contains(key)) {
+          var suffix = 2;
+          do {
+            candidate = '$base$suffix';
+            key = candidate.toLowerCase();
+            suffix++;
+          } while (takenKeys.contains(key));
+
+          renamedCount++;
+          _db.execute(
+            'UPDATE users SET display_name=?, display_name_normalized=?, updated_at=? WHERE id=?',
+            [candidate, key, now, id],
+          );
+          _db.execute(
+            'UPDATE user_profiles SET display_name=?, updated_at=? WHERE user_id=?',
+            [candidate, now, id],
+          );
+          _db.execute(
+            'UPDATE community_profiles SET display_name=?, updated_at=? WHERE user_id=?',
+            [candidate, now, id],
+          );
+          _db.execute(
+            'UPDATE coach_public_profiles SET display_name=?, updated_at=? WHERE coach_user_id=?',
+            [candidate, now, id],
+          );
+        } else {
+          _db.execute('UPDATE users SET display_name_normalized=? WHERE id=?', [key, id]);
+        }
+        takenKeys.add(key);
+      }
+
+      _db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_display_name_normalized
+        ON users(display_name_normalized) WHERE is_deleted = 0;
+      ''');
+      _db.execute('COMMIT;');
+      if (renamedCount > 0) {
+        logInfo('display_name uniqueness migration: auto-suffixed $renamedCount colliding account(s)');
+      }
+    } catch (e) {
+      _db.execute('ROLLBACK;');
+      rethrow;
+    }
+  }
+
+  /// Réconcilie `users.display_name` avec `user_profiles.display_name`
+  /// quand ils divergent — legs de données antérieures à l'introduction du
+  /// pseudo unique : `upsertProfile()` les maintient en lockstep aujourd'hui,
+  /// mais des comptes existants en prod avaient déjà divergé avant que cette
+  /// garantie n'existe (`user_profiles.display_name` a été modifié par un
+  /// chemin plus ancien sans jamais toucher `users.display_name`). Comme
+  /// `user_profiles.display_name` est ce que l'utilisateur voit dans "Mon
+  /// compte" (`session.profile.displayName`), c'est lui qui fait foi ici —
+  /// on aligne `users` dessus plutôt que l'inverse. Sans ça, la recherche
+  /// par pseudo (basée sur `users.display_name_normalized`) ne trouve jamais
+  /// le nom que l'utilisateur croit avoir.
+  void _reconcileUserProfileDisplayNameMismatchIfNeeded() {
+    final mismatches = _db.select('''
+      SELECT u.id, up.display_name as profile_name
+      FROM users u
+      JOIN user_profiles up ON up.user_id = u.id
+      WHERE u.is_deleted = 0 AND u.display_name != up.display_name;
+    ''');
+    if (mismatches.isEmpty) return;
+
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      final now = dbNow();
+      var fixedCount = 0;
+      for (final row in mismatches) {
+        final id = row['id'] as String;
+        final rawCandidate = (row['profile_name'] as String).trim();
+        final base = rawCandidate.isEmpty ? 'Athlète' : rawCandidate;
+        var finalName = base;
+        var key = finalName.toLowerCase();
+        var suffix = 2;
+        while (_db.select(
+          'SELECT id FROM users WHERE display_name_normalized=? AND is_deleted=0 AND id!=? LIMIT 1',
+          [key, id],
+        ).isNotEmpty) {
+          finalName = '$base$suffix';
+          key = finalName.toLowerCase();
+          suffix++;
+        }
+        _db.execute(
+          'UPDATE users SET display_name=?, display_name_normalized=?, updated_at=? WHERE id=?',
+          [finalName, key, now, id],
+        );
+        if (finalName != rawCandidate) {
+          _db.execute(
+            'UPDATE user_profiles SET display_name=?, updated_at=? WHERE user_id=?',
+            [finalName, now, id],
+          );
+        }
+        fixedCount++;
+      }
+      _db.execute('COMMIT;');
+      if (fixedCount > 0) {
+        logInfo('users/user_profiles display_name reconciliation: fixed $fixedCount mismatched account(s)');
+      }
     } catch (e) {
       _db.execute('ROLLBACK;');
       rethrow;

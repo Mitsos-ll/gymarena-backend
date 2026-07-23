@@ -66,12 +66,15 @@ class UserRepository {
     final userId = _uuid.v4();
     final passwordHash = hashPassword(password); // BCrypt
     final finalDisplayName = _normalizeDisplayName(displayName, normalizedEmail);
+    if (_isDisplayNameTaken(finalDisplayName)) {
+      throw ApiException('This display name is already taken.', statusCode: 409);
+    }
     final tokens = _sessionService.issueTokens();
 
     _database.raw.execute(
-      'INSERT INTO users (id, email, display_name, photo_url, created_at, updated_at, last_login_at, is_deleted) '
-      'VALUES (?, ?, ?, NULL, ?, ?, ?, 0)',
-      [userId, normalizedEmail, finalDisplayName, now, now, now],
+      'INSERT INTO users (id, email, display_name, display_name_normalized, photo_url, created_at, updated_at, last_login_at, is_deleted) '
+      'VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0)',
+      [userId, normalizedEmail, finalDisplayName, finalDisplayName.toLowerCase(), now, now, now],
     );
 
     _database.raw.execute(
@@ -266,6 +269,10 @@ class UserRepository {
     final userId = sessionRow['user_id'] as String;
     final now = dbNow();
 
+    if (_isDisplayNameTaken(input.displayName, excludeUserId: userId)) {
+      throw ApiException('This display name is already taken.', statusCode: 409);
+    }
+
     final existingProfile = _findProfileByUserId(userId);
     if (existingProfile == null) {
       _database.raw.execute(
@@ -281,8 +288,8 @@ class UserRepository {
     }
 
     _database.raw.execute(
-      'UPDATE users SET display_name=?, updated_at=?, last_login_at=? WHERE id=?',
-      [input.displayName, now, now, userId],
+      'UPDATE users SET display_name=?, display_name_normalized=?, updated_at=?, last_login_at=? WHERE id=?',
+      [input.displayName, input.displayName.trim().toLowerCase(), now, now, userId],
     );
 
     return getSessionByAccessToken(accessToken);
@@ -338,11 +345,15 @@ class UserRepository {
   ApiSession _createNewUserSession(GoogleTokenPayload google, String now) {
     final userId = _uuid.v4();
     final tokens = _sessionService.issueTokens();
+    // Pas d'étape interactive à la création d'un compte Google (contrairement
+    // à l'inscription/l'édition manuelle) : en cas de collision, on suffixe
+    // silencieusement plutôt que d'échouer la connexion.
+    final finalDisplayName = _resolveUniqueDisplayName(google.displayName);
 
     _database.raw.execute(
-      'INSERT INTO users (id, email, display_name, photo_url, created_at, updated_at, last_login_at, is_deleted) '
-      'VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
-      [userId, google.email, google.displayName, google.photoUrl, now, now, now],
+      'INSERT INTO users (id, email, display_name, display_name_normalized, photo_url, created_at, updated_at, last_login_at, is_deleted) '
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
+      [userId, google.email, finalDisplayName, finalDisplayName.toLowerCase(), google.photoUrl, now, now, now],
     );
 
     _database.raw.execute(
@@ -354,7 +365,7 @@ class UserRepository {
     _database.raw.execute(
       'INSERT INTO user_profiles (user_id, display_name, weight_kg, height_cm, sex, onboarding_completed, created_at, updated_at) '
       'VALUES (?, ?, NULL, NULL, ?, 0, ?, ?)',
-      [userId, google.displayName, UserSex.unspecified.name, now, now],
+      [userId, finalDisplayName, UserSex.unspecified.name, now, now],
     );
 
     _insertSession(userId: userId, tokens: tokens, now: now);
@@ -378,22 +389,43 @@ class UserRepository {
 
   ApiSession _reuseExistingUserSession(
       String userId, GoogleTokenPayload google, String now) {
-    _database.raw.execute(
-      'UPDATE users SET email=?, display_name=?, photo_url=?, updated_at=?, last_login_at=?, is_deleted=0 WHERE id=?',
-      [google.email, google.displayName, google.photoUrl, now, now, userId],
-    );
+    // display_name est désormais un pseudo unique choisi par l'utilisateur
+    // (éditable dans "Mon compte") — une fois le profil créé, une
+    // reconnexion Google ne doit plus jamais l'écraser avec le nom Google du
+    // moment : sinon un pseudo personnalisé se ferait silencieusement
+    // remplacer, voire re-suffixer si quelqu'un d'autre a entre-temps pris
+    // ce nom Google (ex. "Alex" personnalisé en "AlexTheLegend", puis un
+    // tiers prend "Alex" : la reconnexion renommerait le compte en "Alex2"
+    // sans que l'utilisateur n'ait rien demandé).
+    final hasProfile = _findProfileByUserId(userId) != null;
+
+    if (hasProfile) {
+      _database.raw.execute(
+        'UPDATE users SET email=?, photo_url=?, updated_at=?, last_login_at=?, is_deleted=0 WHERE id=?',
+        [google.email, google.photoUrl, now, now, userId],
+      );
+    } else {
+      // Pas de profil existant (ex. compte email/mdp historique jamais
+      // complété) : aucun pseudo à préserver, on résout un nom par défaut
+      // comme à la création — excludeUserId pour ne pas se re-suffixer
+      // soi-même si le nom Google est inchangé.
+      final finalDisplayName =
+          _resolveUniqueDisplayName(google.displayName, excludeUserId: userId);
+      _database.raw.execute(
+        'UPDATE users SET email=?, display_name=?, display_name_normalized=?, photo_url=?, updated_at=?, last_login_at=?, is_deleted=0 WHERE id=?',
+        [google.email, finalDisplayName, finalDisplayName.toLowerCase(), google.photoUrl, now, now, userId],
+      );
+      _database.raw.execute(
+        'INSERT INTO user_profiles (user_id, display_name, weight_kg, height_cm, sex, onboarding_completed, created_at, updated_at) '
+        'VALUES (?, ?, NULL, NULL, ?, 0, ?, ?)',
+        [userId, finalDisplayName, UserSex.unspecified.name, now, now],
+      );
+    }
+
     _database.raw.execute(
       "UPDATE user_auth_accounts SET email=?, email_verified=?, updated_at=? WHERE user_id=? AND provider='google'",
       [google.email, google.emailVerified ? 1 : 0, now, userId],
     );
-
-    if (_findProfileByUserId(userId) == null) {
-      _database.raw.execute(
-        'INSERT INTO user_profiles (user_id, display_name, weight_kg, height_cm, sex, onboarding_completed, created_at, updated_at) '
-        'VALUES (?, ?, NULL, NULL, ?, 0, ?, ?)',
-        [userId, google.displayName, UserSex.unspecified.name, now, now],
-      );
-    }
 
     final tokens = _sessionService.issueTokens();
     _insertSession(userId: userId, tokens: tokens, now: now);
@@ -532,6 +564,55 @@ class UserRepository {
     if (value != null && value.isNotEmpty) return value;
     final localPart = email.split('@').first.trim();
     return localPart.isEmpty ? 'Athlète' : localPart;
+  }
+
+  // ── Unicité du pseudo (display_name) ────────────────────────────────────────
+
+  /// Vérifie `display_name_normalized` (insensible casse/accents, cf.
+  /// `_migrateDisplayNameUniquenessIfNeeded`), pas `LOWER(display_name)` en
+  /// SQL — `LOWER()` de SQLite est ASCII-only.
+  bool _isDisplayNameTaken(String displayName, {String? excludeUserId}) {
+    final key = displayName.trim().toLowerCase();
+    final rows = excludeUserId == null
+        ? _database.raw.select(
+            'SELECT id FROM users WHERE display_name_normalized=? AND is_deleted=0 LIMIT 1',
+            [key],
+          )
+        : _database.raw.select(
+            'SELECT id FROM users WHERE display_name_normalized=? AND is_deleted=0 AND id!=? LIMIT 1',
+            [key, excludeUserId],
+          );
+    return rows.isNotEmpty;
+  }
+
+  /// Utilisé sur les chemins non-interactifs (connexion/inscription Google) :
+  /// pas d'étape où demander un autre nom à l'utilisateur, donc on résout
+  /// silencieusement une variante libre par suffixe numérique.
+  String _resolveUniqueDisplayName(String candidate, {String? excludeUserId}) {
+    final base = candidate.trim().isEmpty ? 'Athlète' : candidate.trim();
+    if (!_isDisplayNameTaken(base, excludeUserId: excludeUserId)) return base;
+    var suffix = 2;
+    while (_isDisplayNameTaken('$base$suffix', excludeUserId: excludeUserId)) {
+      suffix++;
+    }
+    return '$base$suffix';
+  }
+
+  /// Utilisé par la route `GET /auth/display-name-available` (vérification
+  /// en direct côté client, avant soumission).
+  bool isDisplayNameAvailable(String displayName) => !_isDisplayNameTaken(displayName);
+
+  /// Utilisé par la route `GET /community/users/lookup` (ajout d'ami par
+  /// pseudo) — résolution insensible casse/accents via la même colonne
+  /// `display_name_normalized` que les vérifications d'unicité ci-dessus.
+  ApiUser? findByDisplayName(String displayName) {
+    final key = displayName.trim().toLowerCase();
+    final rows = _database.raw.select(
+      'SELECT * FROM users WHERE display_name_normalized=? AND is_deleted=0 LIMIT 1',
+      [key],
+    );
+    if (rows.isEmpty) return null;
+    return _userFromRow(rows.first);
   }
 }
 

@@ -4,6 +4,7 @@ import '../models/api_profile.dart';
 import '../repositories/user_repository.dart';
 import '../utils/api_exception.dart';
 import '../utils/http_json.dart';
+import '../utils/validator.dart';
 
 class MeRoutes {
   MeRoutes({required UserRepository userRepository})
@@ -35,10 +36,7 @@ class MeRoutes {
       }
 
       final body = await readJsonBody(request);
-      final displayName = body['displayName']?.toString().trim() ?? '';
-      if (displayName.isEmpty) {
-        throw ApiException('displayName is required.', statusCode: 400);
-      }
+      final displayName = validateDisplayName(body['displayName']?.toString(), required: true)!;
 
       final weightKg = _doubleOrNull(body['weightKg']);
       final heightCm = _doubleOrNull(body['heightCm']);

@@ -27,7 +27,12 @@ String validatePassword(String? raw, {bool skipComplexity = false}) {
   return password;
 }
 
+final _controlCharRegex = RegExp(r'[\x00-\x1F\x7F]');
+
 /// Valide un displayName. Si [required] est false, retourne null si absent/vide.
+/// Pas de restriction de charset (le champ sert aussi d'affichage social,
+/// les accents doivent rester possibles) et pas de reformatage rétroactif
+/// des noms existants — seul le rejet des caractères de contrôle est neuf.
 String? validateDisplayName(String? raw, {bool required = false}) {
   final name = raw?.trim();
   if (name == null || name.isEmpty) {
@@ -36,6 +41,9 @@ String? validateDisplayName(String? raw, {bool required = false}) {
   }
   if (name.length > 100) {
     throw ApiException('displayName must be 100 characters or fewer.', statusCode: 400);
+  }
+  if (_controlCharRegex.hasMatch(name)) {
+    throw ApiException('displayName contains invalid characters.', statusCode: 400);
   }
   return name;
 }

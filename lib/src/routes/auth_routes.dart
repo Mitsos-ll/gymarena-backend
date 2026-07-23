@@ -60,6 +60,29 @@ class AuthRoutes {
     }
   }
 
+  /// Vérification de disponibilité d'un pseudo, en direct côté client
+  /// (inscription, onboarding, édition du compte) avant soumission.
+  /// Volontairement sans authentification — seule exception du genre dans ce
+  /// fichier de routes GET : l'écran d'inscription n'a pas encore de token à
+  /// ce stade.
+  ///
+  /// Pas de `_enforceAuthLimit` ici (contrairement aux autres routes de ce
+  /// fichier) : c'est une lecture seule, sans risque de credential-stuffing,
+  /// appelée à chaque frappe (débounce ~450ms) — le budget register/login
+  /// (10 req/60s) s'épuisait en quelques secondes de saisie normale, après
+  /// quoi le client échouait silencieusement en "non vérifié" (fail-open,
+  /// cf. display_name_field.dart) et laissait passer des pseudos en réalité
+  /// déjà pris. Le limiteur global (middleware, IP) reste appliqué.
+  Future<Response> checkDisplayNameAvailable(Request request) async {
+    try {
+      final raw = request.requestedUri.queryParameters['displayName'];
+      final displayName = validateDisplayName(raw, required: true)!;
+      return jsonResponse({'available': _userRepository.isDisplayNameAvailable(displayName)});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
   Future<Response> login(Request request) async {
     try {
       _enforceAuthLimit(request);

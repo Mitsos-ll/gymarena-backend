@@ -883,6 +883,23 @@ class SyncRoutes {
     }
   }
 
+  // ── GET /community/users/lookup ─────────────────────────────────────────
+
+  Future<Response> lookupUserByDisplayName(Request request) async {
+    try {
+      requireAuth(request, _repo);
+      final displayName = request.url.queryParameters['displayName']?.trim() ?? '';
+      if (displayName.isEmpty) {
+        throw ApiException('displayName is required.', statusCode: 400);
+      }
+      final user = _repo.findByDisplayName(displayName);
+      if (user == null) throw ApiException('User not found.', statusCode: 404);
+      return jsonResponse({'id': user.id, 'displayName': user.displayName});
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
   // ── POST /community/relations ─────────────────────────────────────────────
 
   Future<Response> pushRelation(Request request) async {
@@ -995,8 +1012,15 @@ class SyncRoutes {
           'SELECT display_name FROM user_profiles WHERE user_id=?',
           [uid],
         );
-        final displayName = (cp.isNotEmpty ? cp.first['display_name'] : null)
-            ?? (up.isNotEmpty ? up.first['display_name'] : null)
+        // user_profiles.display_name est toujours à jour (réécrit en lockstep
+        // par upsertProfile()/AuthController.updateDisplayName()) —
+        // community_profiles.display_name est un instantané pris à la
+        // création du profil communauté, jamais resynchronisé si l'utilisateur
+        // renomme son pseudo ensuite dans "Mon compte". Sans cette priorité,
+        // les amis voient un pseudo obsolète et la recherche par pseudo (qui
+        // interroge le pseudo réel du compte) ne trouve jamais ce nom affiché.
+        final displayName = (up.isNotEmpty ? up.first['display_name'] : null)
+            ?? (cp.isNotEmpty ? cp.first['display_name'] : null)
             ?? uid;
         return {
           'userId': uid,
@@ -1132,8 +1156,14 @@ class SyncRoutes {
       final placeholders = List.filled(friendIds.length, '?').join(',');
 
       final allWorkoutShares = _db.raw.select(
-        'SELECT ws.*, cp.display_name as owner_display_name, cp.avatar_preset_id as owner_avatar '
-        'FROM workout_shares ws LEFT JOIN community_profiles cp ON cp.user_id = ws.owner_user_id '
+        // COALESCE(up.display_name, cp.display_name) : user_profiles est
+        // toujours à jour, community_profiles peut être un pseudo obsolète
+        // (jamais resynchronisé après un renommage dans "Mon compte").
+        'SELECT ws.*, COALESCE(up.display_name, cp.display_name) as owner_display_name, '
+        'cp.avatar_preset_id as owner_avatar '
+        'FROM workout_shares ws '
+        'LEFT JOIN community_profiles cp ON cp.user_id = ws.owner_user_id '
+        'LEFT JOIN user_profiles up ON up.user_id = ws.owner_user_id '
         "WHERE ws.owner_user_id IN ($placeholders) "
         'ORDER BY ws.created_at DESC LIMIT 200',
         friendIds,
@@ -1143,8 +1173,11 @@ class SyncRoutes {
       ).take(100).toList();
 
       final programShares = _db.raw.select(
-        'SELECT ps.*, cp.display_name as owner_display_name, cp.avatar_preset_id as owner_avatar '
-        'FROM program_shares ps LEFT JOIN community_profiles cp ON cp.user_id = ps.owner_user_id '
+        'SELECT ps.*, COALESCE(up.display_name, cp.display_name) as owner_display_name, '
+        'cp.avatar_preset_id as owner_avatar '
+        'FROM program_shares ps '
+        'LEFT JOIN community_profiles cp ON cp.user_id = ps.owner_user_id '
+        'LEFT JOIN user_profiles up ON up.user_id = ps.owner_user_id '
         "WHERE ps.owner_user_id IN ($placeholders) "
         'ORDER BY ps.created_at DESC LIMIT 50',
         friendIds,
@@ -1302,7 +1335,16 @@ class SyncRoutes {
       if (profileRows.isEmpty) {
         throw ApiException('Not authorized to view this athlete.', statusCode: 403);
       }
-      final displayName = profileRows.first['display_name'] as String? ?? 'Athlète';
+      // user_profiles.display_name est toujours à jour (cf. getRelations) —
+      // community_profiles.display_name reste utilisé pour l'autorisation
+      // (privacy_json), mais pas comme source du nom affiché.
+      final userProfileRows = _db.raw.select(
+        'SELECT display_name FROM user_profiles WHERE user_id=? LIMIT 1',
+        [relationUserId],
+      );
+      final displayName = (userProfileRows.isNotEmpty ? userProfileRows.first['display_name'] as String? : null)
+          ?? profileRows.first['display_name'] as String?
+          ?? 'Athlète';
 
       var allowedRelations = const <dynamic>[];
       try {

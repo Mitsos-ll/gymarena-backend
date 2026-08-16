@@ -143,8 +143,8 @@ class InviteRoutes {
     final name = info == null ? null : _escapeHtml(info.displayName);
 
     final headline = name != null
-        ? '$name t’invite sur GymTrack !'
-        : 'Ce lien d’invitation GymTrack est invalide ou a expiré.';
+        ? '$name t’invite sur GymArena !'
+        : 'Ce lien d’invitation GymArena est invalide ou a expiré.';
     final subtitle = name != null
         ? 'Installe l’application, puis entre le code ci-dessous pour vous ajouter en amis.'
         : 'Demande à la personne qui t’a envoyé ce lien de t’en partager un nouveau.';
@@ -155,7 +155,7 @@ class InviteRoutes {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GymTrack — Invitation</title>
+<title>GymArena — Invitation</title>
 <style>
   body { font-family: -apple-system, Roboto, Arial, sans-serif; background:#0F1720; color:#fff;
          margin:0; padding:32px 20px; text-align:center; }
@@ -172,9 +172,12 @@ class InviteRoutes {
   <h1>$headline</h1>
   <p>$subtitle</p>
   ${info != null ? '<div class="code">${_escapeHtml(code)}</div>' : ''}
+  <!-- Le package doit rester aligné sur applicationId (android/app/build.gradle.kts) :
+       un id inconnu du Play Store affiche « Élément introuvable » à l'utilisateur.
+       Pas de lien iOS tant que l'app n'est pas publiée sur l'App Store — un
+       identifiant factice produirait exactement la même impasse. -->
   <div class="badges">
-    <a href="https://play.google.com/store/apps/details?id=com.gymtrack.app">Android</a>
-    <a href="https://apps.apple.com/app/id0000000000">iOS</a>
+    <a href="https://play.google.com/store/apps/details?id=com.gymarena.app">Android</a>
   </div>
 </body>
 </html>

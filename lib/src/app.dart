@@ -18,6 +18,7 @@ import 'routes/auth_routes.dart';
 import 'routes/coach_routes.dart';
 import 'routes/exercise_catalog_routes.dart';
 import 'routes/invite_routes.dart';
+import 'routes/legal_routes.dart';
 import 'routes/me_routes.dart';
 import 'routes/sync_routes.dart';
 import 'services/email_service.dart';
@@ -161,6 +162,7 @@ class GymTrackBackend {
   late final AdminRoutes adminRoutes;
   late final CoachRoutes coachRoutes;
   late final InviteRoutes inviteRoutes;
+  final LegalRoutes legalRoutes = LegalRoutes();
   late final SyncRoutes syncRoutes;
   late final ExerciseCatalogRepository exerciseCatalogRepository;
   late final WorkoutXService workoutXService;
@@ -237,6 +239,10 @@ class GymTrackBackend {
     // ── Universal Links / App Links (à compléter avec les vraies valeurs
     // Apple Team ID / bundle ID et empreinte SHA-256 du certificat Android
     // avant de publier — voir commentaires dans _wellKnownHandler) ───────────
+    // ── Pages légales publiques (URL déclarée dans Play Console) ────────────
+    router.get('/privacy', legalRoutes.privacyPolicy);
+    router.get('/privacy-policy', legalRoutes.privacyPolicy);
+
     router.get('/.well-known/apple-app-site-association', _appleAppSiteAssociationHandler);
     router.get('/.well-known/assetlinks.json', _assetLinksHandler);
 
@@ -285,10 +291,10 @@ class GymTrackBackend {
         .addHandler(router.call);
   }
 
-  // Valeurs à renseigner avant activation des Universal Links / App Links :
-  // - iOS : remplacer TEAMID.com.gymtrack.app par "<Apple Team ID>.<bundle id>"
-  // - Android : remplacer le package et ajouter l'empreinte SHA-256 du
-  //   certificat de signature (obtenue via `keytool -list -v`)
+  // iOS reste à compléter : remplacer TEAMID.com.gymtrack.app par le vrai
+  // "<Apple Team ID>.<bundle id>" dès qu'un compte Apple Developer existe —
+  // voir memory project_pending_deeplink_config. Android est renseigné
+  // (empreinte SHA-256 de la clé de signature d'application Play App Signing).
   Response _appleAppSiteAssociationHandler(Request request) {
     return jsonResponse({
       'applinks': {
@@ -309,8 +315,10 @@ class GymTrackBackend {
         'relation': ['delegate_permission/common.handle_all_urls'],
         'target': {
           'namespace': 'android_app',
-          'package_name': 'com.gymtrack.app',
-          'sha256_cert_fingerprints': <String>[],
+          'package_name': 'com.gymarena.app',
+          'sha256_cert_fingerprints': <String>[
+            '9F:3B:AB:73:E0:E3:7A:5A:05:08:B0:1A:D3:8F:54:89:DE:72:D5:C6:0A:67:77:96:49:D7:71:84:7F:B9:E2:3B',
+          ],
         },
       },
     ]);

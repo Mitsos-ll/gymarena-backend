@@ -18,7 +18,6 @@ import 'routes/auth_routes.dart';
 import 'routes/coach_routes.dart';
 import 'routes/exercise_catalog_routes.dart';
 import 'routes/invite_routes.dart';
-import 'routes/legal_routes.dart';
 import 'routes/me_routes.dart';
 import 'routes/sync_routes.dart';
 import 'services/email_service.dart';
@@ -162,7 +161,6 @@ class GymTrackBackend {
   late final AdminRoutes adminRoutes;
   late final CoachRoutes coachRoutes;
   late final InviteRoutes inviteRoutes;
-  final LegalRoutes legalRoutes = LegalRoutes();
   late final SyncRoutes syncRoutes;
   late final ExerciseCatalogRepository exerciseCatalogRepository;
   late final WorkoutXService workoutXService;
@@ -239,10 +237,6 @@ class GymTrackBackend {
     // ── Universal Links / App Links (à compléter avec les vraies valeurs
     // Apple Team ID / bundle ID et empreinte SHA-256 du certificat Android
     // avant de publier — voir commentaires dans _wellKnownHandler) ───────────
-    // ── Pages légales publiques (URL déclarée dans Play Console) ────────────
-    router.get('/privacy', legalRoutes.privacyPolicy);
-    router.get('/privacy-policy', legalRoutes.privacyPolicy);
-
     router.get('/.well-known/apple-app-site-association', _appleAppSiteAssociationHandler);
     router.get('/.well-known/assetlinks.json', _assetLinksHandler);
 

@@ -5,6 +5,7 @@ AppConfig testConfig() => AppConfig(
       env: 'test',
       databasePath: ':memory:',
       googleWebClientId: 'test-client-id',
+      appleBundleId: 'com.gymarena.app',
       accessTokenTtlDays: 1,
       refreshTokenTtlDays: 7,
       corsAllowedOrigins: ['*'],

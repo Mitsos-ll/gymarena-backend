@@ -2,6 +2,7 @@
 
 Backend minimal prêt pour :
 - `POST /auth/google`
+- `POST /auth/apple`
 - `GET /me`
 - `PUT /me/profile`
 - `POST /auth/refresh`

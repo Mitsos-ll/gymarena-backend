@@ -20,6 +20,7 @@ import 'routes/exercise_catalog_routes.dart';
 import 'routes/invite_routes.dart';
 import 'routes/me_routes.dart';
 import 'routes/sync_routes.dart';
+import 'services/apple_token_service.dart';
 import 'services/email_service.dart';
 import 'services/gif_cache_service.dart';
 import 'services/google_token_service.dart';
@@ -29,7 +30,9 @@ import 'utils/http_json.dart';
 import 'utils/logger.dart';
 
 class GymTrackBackend {
-  GymTrackBackend(this.config)
+  /// [appleTokenService] n'est à fournir que par les tests (faux jeu de clés
+  /// Apple) ; en exécution normale il est construit depuis [config].
+  GymTrackBackend(this.config, {AppleTokenService? appleTokenService})
       : database = AppDatabase.open(config.databasePath),
         sessionService = SessionService(
           accessTokenTtlDays: config.accessTokenTtlDays,
@@ -38,6 +41,8 @@ class GymTrackBackend {
         googleTokenService = GoogleTokenService(
           webClientId: config.googleWebClientId,
         ),
+        appleTokenService = appleTokenService ??
+            AppleTokenService(bundleId: config.appleBundleId),
         emailService = EmailService(
           apiKey: config.resendApiKey,
           fromEmail: config.resendFromEmail,
@@ -65,6 +70,7 @@ class GymTrackBackend {
     );
     authRoutes = AuthRoutes(
       googleTokenService: googleTokenService,
+      appleTokenService: this.appleTokenService,
       userRepository: userRepository,
       authLimiter: _authLimiter,
       emailService: emailService,
@@ -151,6 +157,7 @@ class GymTrackBackend {
   final AppDatabase database;
   final SessionService sessionService;
   final GoogleTokenService googleTokenService;
+  final AppleTokenService appleTokenService;
   final EmailService emailService;
   final RateLimiter _globalLimiter;
   final RateLimiter _authLimiter;
@@ -174,6 +181,7 @@ class GymTrackBackend {
     router.get('/admin/stats', adminRoutes.statsHandler);
 
     router.post('/auth/google', authRoutes.signInGoogle);
+    router.post('/auth/apple', authRoutes.signInApple);
     router.get('/auth/display-name-available', authRoutes.checkDisplayNameAvailable);
     router.post('/auth/register', authRoutes.register);
     router.post('/auth/login', authRoutes.login);
@@ -330,6 +338,7 @@ class GymTrackBackend {
 
   Future<void> close() async {
     googleTokenService.close();
+    appleTokenService.close();
     workoutXService.close();
     database.close();
   }

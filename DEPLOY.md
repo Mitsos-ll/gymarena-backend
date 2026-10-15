@@ -51,6 +51,7 @@ La base SQLite est persistée dans un volume Docker (`gymtrack_data`).
 | Variable | Défaut | Requis |
 |---|---|---|
 | `GOOGLE_WEB_CLIENT_ID` | — | ✅ |
+| `APPLE_BUNDLE_ID` | `com.gymarena.app` | |
 | `ENV` | `development` | |
 | `PORT` | `3000` | |
 | `DATABASE_PATH` | `data/gymtrack.db` | |
@@ -70,6 +71,7 @@ La base SQLite est persistée dans un volume Docker (`gymtrack_data`).
 |---|---|---|---|
 | GET | `/health` | Non | Status du serveur |
 | POST | `/auth/google` | Non | Connexion Google OAuth |
+| POST | `/auth/apple` | Non | Connexion Sign in with Apple (`identityToken`, `nonce`, `fullName` optionnel) |
 | POST | `/auth/register` | Non | Inscription email/password |
 | POST | `/auth/login` | Non | Connexion email/password |
 | POST | `/auth/refresh` | Non | Renouveler les tokens |

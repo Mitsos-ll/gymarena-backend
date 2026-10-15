@@ -2,6 +2,7 @@ import 'package:shelf/shelf.dart';
 
 import '../middleware/rate_limit_middleware.dart';
 import '../repositories/user_repository.dart';
+import '../services/apple_token_service.dart';
 import '../services/email_service.dart';
 import '../services/google_token_service.dart';
 import '../utils/api_exception.dart';
@@ -12,15 +13,18 @@ import '../utils/validator.dart';
 class AuthRoutes {
   AuthRoutes({
     required GoogleTokenService googleTokenService,
+    required AppleTokenService appleTokenService,
     required UserRepository userRepository,
     required RateLimiter authLimiter,
     required EmailService emailService,
   })  : _googleTokenService = googleTokenService,
+        _appleTokenService = appleTokenService,
         _userRepository = userRepository,
         _authLimiter = authLimiter,
         _emailService = emailService;
 
   final GoogleTokenService _googleTokenService;
+  final AppleTokenService _appleTokenService;
   final UserRepository _userRepository;
   final RateLimiter _authLimiter;
   final EmailService _emailService;
@@ -33,6 +37,34 @@ class AuthRoutes {
 
       final google = await _googleTokenService.verifyIdToken(idToken);
       final session = _userRepository.signInWithGoogle(google);
+      return jsonResponse(session.toJson());
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  Future<Response> signInApple(Request request) async {
+    try {
+      _enforceAuthLimit(request);
+      final body = await readJsonBody(request);
+      final identityToken =
+          validateIdToken(body['identityToken']?.toString(), field: 'identityToken');
+      final nonce = validateNonce(body['nonce']?.toString());
+
+      // Simple indice pour le pseudo par défaut : un nom invalide ne doit pas
+      // empêcher la connexion, il retombe sur le pseudo de secours.
+      String? fullName;
+      try {
+        fullName = validateDisplayName(body['fullName']?.toString());
+      } on ApiException {
+        fullName = null;
+      }
+
+      final apple = await _appleTokenService.verifyIdentityToken(
+        identityToken,
+        rawNonce: nonce,
+      );
+      final session = _userRepository.signInWithApple(apple, fullName: fullName);
       return jsonResponse(session.toJson());
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);

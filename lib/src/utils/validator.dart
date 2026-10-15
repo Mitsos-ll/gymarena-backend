@@ -48,12 +48,23 @@ String? validateDisplayName(String? raw, {bool required = false}) {
   return name;
 }
 
-/// Valide un idToken Google (non-vide, longueur raisonnable).
-String validateIdToken(String? raw) {
+/// Valide un token d'identité OAuth (non-vide, longueur raisonnable).
+/// [field] nomme le champ dans le message d'erreur.
+String validateIdToken(String? raw, {String field = 'idToken'}) {
   final token = raw?.trim() ?? '';
-  if (token.isEmpty) throw ApiException('idToken is required.', statusCode: 400);
-  if (token.length > 4096) throw ApiException('idToken is too long.', statusCode: 400);
+  if (token.isEmpty) throw ApiException('$field is required.', statusCode: 400);
+  if (token.length > 4096) throw ApiException('$field is too long.', statusCode: 400);
   return token;
+}
+
+/// Valide le nonce brut d'une connexion Apple (non-vide, longueur raisonnable).
+/// Volontairement sans trim : sa valeur exacte est celle dont le client a
+/// envoyé le SHA-256 à Apple.
+String validateNonce(String? raw) {
+  final nonce = raw ?? '';
+  if (nonce.isEmpty) throw ApiException('nonce is required.', statusCode: 400);
+  if (nonce.length > 256) throw ApiException('nonce is too long.', statusCode: 400);
+  return nonce;
 }
 
 /// Valide un refreshToken (non-vide).

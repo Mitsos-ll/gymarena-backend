@@ -6,6 +6,7 @@ class AppConfig {
     required this.env,
     required this.databasePath,
     required this.googleWebClientId,
+    required this.appleBundleId,
     required this.accessTokenTtlDays,
     required this.refreshTokenTtlDays,
     required this.corsAllowedOrigins,
@@ -24,6 +25,7 @@ class AppConfig {
   final String env;          // 'development' | 'production'
   final String databasePath;
   final String googleWebClientId;
+  final String appleBundleId;
   final int accessTokenTtlDays;
   final int refreshTokenTtlDays;
   final List<String> corsAllowedOrigins;
@@ -76,6 +78,7 @@ class AppConfig {
       env: env,
       databasePath: get('DATABASE_PATH', 'data/gymtrack.db'),
       googleWebClientId: require('GOOGLE_WEB_CLIENT_ID'),
+      appleBundleId: get('APPLE_BUNDLE_ID', 'com.gymarena.app'),
       accessTokenTtlDays: getInt('ACCESS_TOKEN_TTL_DAYS', 30),
       refreshTokenTtlDays: getInt('REFRESH_TOKEN_TTL_DAYS', 90),
       corsAllowedOrigins: corsOrigins,

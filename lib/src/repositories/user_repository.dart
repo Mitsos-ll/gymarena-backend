@@ -6,6 +6,8 @@ import '../db/app_database.dart';
 import '../models/api_profile.dart';
 import '../models/api_session.dart';
 import '../models/api_user.dart';
+import '../models/oauth_identity.dart';
+import '../services/apple_token_service.dart';
 import '../services/google_token_service.dart';
 import '../services/session_service.dart';
 import '../utils/api_exception.dart';
@@ -26,27 +28,72 @@ class UserRepository {
 
   static const _resetCodeValidityMinutes = 15;
 
-  // ── Google OAuth ────────────────────────────────────────────────────────────
+  // ── OAuth (Google, Apple) ───────────────────────────────────────────────────
 
-  ApiSession signInWithGoogle(GoogleTokenPayload google) {
+  ApiSession signInWithGoogle(GoogleTokenPayload google) =>
+      _signInWithOAuth(OAuthIdentity(
+        provider: OAuthProvider.google,
+        subject: google.subject,
+        email: google.email,
+        emailVerified: google.emailVerified,
+        displayName: google.displayName,
+        photoUrl: google.photoUrl,
+      ));
+
+  /// [fullName] vient du client : Apple ne le met pas dans le token et ne le
+  /// donne qu'à la toute première autorisation de l'app.
+  ApiSession signInWithApple(AppleTokenPayload apple, {String? fullName}) =>
+      _signInWithOAuth(OAuthIdentity(
+        provider: OAuthProvider.apple,
+        subject: apple.subject,
+        email: apple.email,
+        emailVerified: apple.emailVerified,
+        displayName: _appleDefaultDisplayName(apple, fullName),
+      ));
+
+  ApiSession _signInWithOAuth(OAuthIdentity identity) {
     final now = dbNow();
 
-    final linkedUserId = _findUserIdByGoogleSubject(google.subject);
+    final linkedUserId =
+        _findUserIdByProviderSubject(identity.provider, identity.subject);
     if (linkedUserId != null) {
-      return _reuseExistingUserSession(linkedUserId, google, now);
+      return _reuseExistingUserSession(linkedUserId, identity, now);
     }
 
-    // Aucun compte Google lié à ce subject : un utilisateur peut néanmoins déjà
+    // users.email est NOT NULL UNIQUE : sans adresse, on ne peut ni rattacher
+    // ni créer de compte. Apple peut en omettre une si l'utilisateur a déjà
+    // autorisé l'app puis l'a retirée de ses réglages.
+    final email = identity.email;
+    if (email == null) {
+      throw ApiException(
+        'Apple did not share an email address. Remove GymArena from the '
+        'Sign in with Apple settings of your Apple Account, then try again.',
+        statusCode: 400,
+      );
+    }
+
+    // Aucun compte lié à ce subject : un utilisateur peut néanmoins déjà
     // exister avec cet email (inscription gymtrack email/mdp, ou compte antérieur).
-    // On rattache le provider Google au user existant plutôt que d'insérer un
+    // On rattache le provider au user existant plutôt que d'insérer un
     // doublon — sinon violation UNIQUE(users.email).
-    final existingByEmail = _getUserByEmail(google.email);
+    final existingByEmail = _getUserByEmail(email);
     if (existingByEmail != null) {
-      _linkGoogleAccount(existingByEmail.id, google, now);
-      return _reuseExistingUserSession(existingByEmail.id, google, now);
+      _linkOAuthAccount(existingByEmail.id, identity, now);
+      return _reuseExistingUserSession(existingByEmail.id, identity, now);
     }
 
-    return _createNewUserSession(google, now);
+    return _createNewUserSession(identity, email, now);
+  }
+
+  /// Le relais « Masquer mon e-mail » est une suite aléatoire : un mauvais
+  /// pseudo par défaut. Une chaîne vide laisse `_resolveUniqueDisplayName`
+  /// retomber sur « Athlète ».
+  String _appleDefaultDisplayName(AppleTokenPayload apple, String? fullName) {
+    final name = fullName?.trim();
+    if (name != null && name.isNotEmpty) return name;
+    final email = apple.email;
+    if (email != null && !apple.isPrivateEmail) return email.split('@').first;
+    return '';
   }
 
   // ── Registration / Login ────────────────────────────────────────────────────
@@ -342,24 +389,25 @@ class UserRepository {
 
   // ── Private helpers ─────────────────────────────────────────────────────────
 
-  ApiSession _createNewUserSession(GoogleTokenPayload google, String now) {
+  ApiSession _createNewUserSession(
+      OAuthIdentity identity, String email, String now) {
     final userId = _uuid.v4();
     final tokens = _sessionService.issueTokens();
-    // Pas d'étape interactive à la création d'un compte Google (contrairement
+    // Pas d'étape interactive à la création d'un compte OAuth (contrairement
     // à l'inscription/l'édition manuelle) : en cas de collision, on suffixe
     // silencieusement plutôt que d'échouer la connexion.
-    final finalDisplayName = _resolveUniqueDisplayName(google.displayName);
+    final finalDisplayName = _resolveUniqueDisplayName(identity.displayName);
 
     _database.raw.execute(
       'INSERT INTO users (id, email, display_name, display_name_normalized, photo_url, created_at, updated_at, last_login_at, is_deleted) '
       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
-      [userId, google.email, finalDisplayName, finalDisplayName.toLowerCase(), google.photoUrl, now, now, now],
+      [userId, email, finalDisplayName, finalDisplayName.toLowerCase(), identity.photoUrl, now, now, now],
     );
 
     _database.raw.execute(
       'INSERT INTO user_auth_accounts (user_id, provider, provider_subject, email, email_verified, created_at, updated_at) '
-      "VALUES (?, 'google', ?, ?, ?, ?, ?)",
-      [userId, google.subject, google.email, google.emailVerified ? 1 : 0, now, now],
+      'VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [userId, identity.provider.name, identity.subject, email, identity.emailVerified ? 1 : 0, now, now],
     );
 
     _database.raw.execute(
@@ -372,48 +420,55 @@ class UserRepository {
     return _buildSession(userId, tokens.accessToken, tokens.refreshToken);
   }
 
-  /// Rattache un provider Google à un utilisateur existant (trouvé par email).
-  /// Idempotent : si une ligne `google` existe déjà pour ce user, on met à jour
-  /// le subject/email au lieu de violer UNIQUE(user_id, provider).
-  void _linkGoogleAccount(String userId, GoogleTokenPayload google, String now) {
+  /// Rattache un provider OAuth à un utilisateur existant (trouvé par email).
+  /// Idempotent : si une ligne de ce provider existe déjà pour ce user, on met
+  /// à jour le subject/email au lieu de violer UNIQUE(user_id, provider).
+  void _linkOAuthAccount(String userId, OAuthIdentity identity, String now) {
     _database.raw.execute(
       'INSERT INTO user_auth_accounts '
       '(user_id, provider, provider_subject, email, email_verified, created_at, updated_at) '
-      "VALUES (?, 'google', ?, ?, ?, ?, ?) "
+      'VALUES (?, ?, ?, ?, ?, ?, ?) '
       'ON CONFLICT(user_id, provider) DO UPDATE SET '
       'provider_subject=excluded.provider_subject, email=excluded.email, '
       'email_verified=excluded.email_verified, updated_at=excluded.updated_at',
-      [userId, google.subject, google.email, google.emailVerified ? 1 : 0, now, now],
+      [userId, identity.provider.name, identity.subject, identity.email, identity.emailVerified ? 1 : 0, now, now],
     );
   }
 
   ApiSession _reuseExistingUserSession(
-      String userId, GoogleTokenPayload google, String now) {
+      String userId, OAuthIdentity identity, String now) {
     // display_name est désormais un pseudo unique choisi par l'utilisateur
     // (éditable dans "Mon compte") — une fois le profil créé, une
-    // reconnexion Google ne doit plus jamais l'écraser avec le nom Google du
-    // moment : sinon un pseudo personnalisé se ferait silencieusement
-    // remplacer, voire re-suffixer si quelqu'un d'autre a entre-temps pris
-    // ce nom Google (ex. "Alex" personnalisé en "AlexTheLegend", puis un
-    // tiers prend "Alex" : la reconnexion renommerait le compte en "Alex2"
-    // sans que l'utilisateur n'ait rien demandé).
+    // reconnexion OAuth ne doit plus jamais l'écraser avec le nom du
+    // fournisseur du moment : sinon un pseudo personnalisé se ferait
+    // silencieusement remplacer, voire re-suffixer si quelqu'un d'autre a
+    // entre-temps pris ce nom (ex. "Alex" personnalisé en "AlexTheLegend",
+    // puis un tiers prend "Alex" : la reconnexion renommerait le compte en
+    // "Alex2" sans que l'utilisateur n'ait rien demandé).
     final hasProfile = _findProfileByUserId(userId) != null;
 
-    if (hasProfile) {
+    if (identity.refreshesUserProfile) {
       _database.raw.execute(
         'UPDATE users SET email=?, photo_url=?, updated_at=?, last_login_at=?, is_deleted=0 WHERE id=?',
-        [google.email, google.photoUrl, now, now, userId],
+        [identity.email, identity.photoUrl, now, now, userId],
       );
     } else {
+      _database.raw.execute(
+        'UPDATE users SET updated_at=?, last_login_at=?, is_deleted=0 WHERE id=?',
+        [now, now, userId],
+      );
+    }
+
+    if (!hasProfile) {
       // Pas de profil existant (ex. compte email/mdp historique jamais
       // complété) : aucun pseudo à préserver, on résout un nom par défaut
       // comme à la création — excludeUserId pour ne pas se re-suffixer
-      // soi-même si le nom Google est inchangé.
+      // soi-même si le nom du fournisseur est inchangé.
       final finalDisplayName =
-          _resolveUniqueDisplayName(google.displayName, excludeUserId: userId);
+          _resolveUniqueDisplayName(identity.displayName, excludeUserId: userId);
       _database.raw.execute(
-        'UPDATE users SET email=?, display_name=?, display_name_normalized=?, photo_url=?, updated_at=?, last_login_at=?, is_deleted=0 WHERE id=?',
-        [google.email, finalDisplayName, finalDisplayName.toLowerCase(), google.photoUrl, now, now, userId],
+        'UPDATE users SET display_name=?, display_name_normalized=? WHERE id=?',
+        [finalDisplayName, finalDisplayName.toLowerCase(), userId],
       );
       _database.raw.execute(
         'INSERT INTO user_profiles (user_id, display_name, weight_kg, height_cm, sex, onboarding_completed, created_at, updated_at) '
@@ -422,10 +477,14 @@ class UserRepository {
       );
     }
 
-    _database.raw.execute(
-      "UPDATE user_auth_accounts SET email=?, email_verified=?, updated_at=? WHERE user_id=? AND provider='google'",
-      [google.email, google.emailVerified ? 1 : 0, now, userId],
-    );
+    // Apple n'envoie pas toujours l'email : ne pas écraser celui déjà connu.
+    final email = identity.email;
+    if (email != null) {
+      _database.raw.execute(
+        'UPDATE user_auth_accounts SET email=?, email_verified=?, updated_at=? WHERE user_id=? AND provider=?',
+        [email, identity.emailVerified ? 1 : 0, now, userId, identity.provider.name],
+      );
+    }
 
     final tokens = _sessionService.issueTokens();
     _insertSession(userId: userId, tokens: tokens, now: now);
@@ -524,10 +583,10 @@ class UserRepository {
     );
   }
 
-  String? _findUserIdByGoogleSubject(String subject) {
+  String? _findUserIdByProviderSubject(OAuthProvider provider, String subject) {
     final rows = _database.raw.select(
-        "SELECT user_id FROM user_auth_accounts WHERE provider='google' AND provider_subject=? LIMIT 1",
-        [subject]);
+        'SELECT user_id FROM user_auth_accounts WHERE provider=? AND provider_subject=? LIMIT 1',
+        [provider.name, subject]);
     if (rows.isEmpty) return null;
     return rows.first['user_id'] as String;
   }
@@ -585,7 +644,7 @@ class UserRepository {
     return rows.isNotEmpty;
   }
 
-  /// Utilisé sur les chemins non-interactifs (connexion/inscription Google) :
+  /// Utilisé sur les chemins non-interactifs (connexion/inscription OAuth) :
   /// pas d'étape où demander un autre nom à l'utilisateur, donc on résout
   /// silencieusement une variante libre par suffixe numérique.
   String _resolveUniqueDisplayName(String candidate, {String? excludeUserId}) {

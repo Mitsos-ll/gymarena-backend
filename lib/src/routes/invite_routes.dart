@@ -4,6 +4,7 @@ import 'package:shelf/shelf.dart';
 import 'package:uuid/uuid.dart';
 
 import '../db/app_database.dart';
+import '../repositories/moderation_repository.dart';
 import '../repositories/user_repository.dart';
 import '../utils/api_exception.dart';
 import '../utils/auth_helper.dart';
@@ -14,12 +15,17 @@ import '../utils/http_json.dart';
 /// réutilisable par plusieurs destinataires jusqu'à expiration : la personne
 /// qui invite le partage une seule fois à tout son entourage.
 class InviteRoutes {
-  InviteRoutes({required UserRepository userRepository, required AppDatabase database})
-      : _repo = userRepository,
-        _db = database;
+  InviteRoutes({
+    required UserRepository userRepository,
+    required AppDatabase database,
+    required ModerationRepository moderation,
+  })  : _repo = userRepository,
+        _db = database,
+        _moderation = moderation;
 
   final UserRepository _repo;
   final AppDatabase _db;
+  final ModerationRepository _moderation;
   final _uuid = const Uuid();
   final _random = Random.secure();
 
@@ -97,6 +103,10 @@ class InviteRoutes {
 
       if (inviterUserId == redeemerUserId) {
         throw ApiException('Vous ne pouvez pas utiliser votre propre code.', statusCode: 400);
+      }
+      // Un code d'invitation ne doit pas permettre de contourner un blocage.
+      if (_moderation.areBlocked(inviterUserId, redeemerUserId)) {
+        throw ApiException('Code invalide ou expiré.', statusCode: 404);
       }
 
       final now = dbNow();

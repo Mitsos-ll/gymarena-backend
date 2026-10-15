@@ -1,30 +1,36 @@
 import 'package:shelf/shelf.dart';
 
 import '../middleware/rate_limit_middleware.dart';
+import '../models/oauth_identity.dart';
 import '../repositories/user_repository.dart';
+import '../services/apple_rest_service.dart';
 import '../services/apple_token_service.dart';
 import '../services/email_service.dart';
 import '../services/google_token_service.dart';
 import '../utils/api_exception.dart';
 import '../utils/client_ip.dart';
 import '../utils/http_json.dart';
+import '../utils/logger.dart';
 import '../utils/validator.dart';
 
 class AuthRoutes {
   AuthRoutes({
     required GoogleTokenService googleTokenService,
     required AppleTokenService appleTokenService,
+    required AppleRestService appleRestService,
     required UserRepository userRepository,
     required RateLimiter authLimiter,
     required EmailService emailService,
   })  : _googleTokenService = googleTokenService,
         _appleTokenService = appleTokenService,
+        _appleRest = appleRestService,
         _userRepository = userRepository,
         _authLimiter = authLimiter,
         _emailService = emailService;
 
   final GoogleTokenService _googleTokenService;
   final AppleTokenService _appleTokenService;
+  final AppleRestService _appleRest;
   final UserRepository _userRepository;
   final RateLimiter _authLimiter;
   final EmailService _emailService;
@@ -65,10 +71,34 @@ class AuthRoutes {
         rawNonce: nonce,
       );
       final session = _userRepository.signInWithApple(apple, fullName: fullName);
+
+      final authorizationCode = body['authorizationCode']?.toString().trim() ?? '';
+      if (authorizationCode.isNotEmpty && authorizationCode.length <= 4096) {
+        await _rememberAppleRefreshToken(session.user.id, apple.subject, authorizationCode);
+      }
       return jsonResponse(session.toJson());
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
     }
+  }
+
+  /// Échange le code d'autorisation contre un refresh token Apple, conservé
+  /// pour pouvoir le révoquer à la suppression du compte. Meilleur effort : un
+  /// échec ne doit jamais empêcher la connexion.
+  Future<void> _rememberAppleRefreshToken(
+    String userId,
+    String appleSubject,
+    String authorizationCode,
+  ) async {
+    if (!_appleRest.isConfigured) return;
+    final exchange = await _appleRest.exchangeAuthorizationCode(authorizationCode);
+    if (exchange == null) return;
+    // Le code doit appartenir au compte Apple qui vient de se connecter.
+    if (exchange.subject != null && exchange.subject != appleSubject) {
+      logWarn('Apple authorization code belongs to another Apple account; ignored');
+      return;
+    }
+    _userRepository.saveProviderRefreshToken(userId, OAuthProvider.apple, exchange.refreshToken);
   }
 
   Future<Response> register(Request request) async {

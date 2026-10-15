@@ -2,15 +2,20 @@ import 'package:shelf/shelf.dart';
 
 import '../models/api_profile.dart';
 import '../repositories/user_repository.dart';
+import '../services/apple_rest_service.dart';
 import '../utils/api_exception.dart';
 import '../utils/http_json.dart';
 import '../utils/validator.dart';
 
 class MeRoutes {
-  MeRoutes({required UserRepository userRepository})
-      : _userRepository = userRepository;
+  MeRoutes({
+    required UserRepository userRepository,
+    required AppleRestService appleRestService,
+  })  : _userRepository = userRepository,
+        _appleRest = appleRestService;
 
   final UserRepository _userRepository;
+  final AppleRestService _appleRest;
 
   Future<Response> getMe(Request request) async {
     try {
@@ -87,7 +92,13 @@ class MeRoutes {
         throw ApiException('Unauthorized.', statusCode: 401);
       }
 
-      _userRepository.deleteAccount(bearer);
+      final appleRefreshToken = _userRepository.deleteAccount(bearer);
+      // Exigé par Apple pour toute app proposant Sign in with Apple. Meilleur
+      // effort : le compte est déjà supprimé, un échec côté Apple ne doit pas
+      // se transformer en erreur pour l'utilisateur.
+      if (appleRefreshToken != null) {
+        await _appleRest.revokeRefreshToken(appleRefreshToken);
+      }
       return jsonResponse({'success': true});
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);

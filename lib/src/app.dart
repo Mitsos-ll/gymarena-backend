@@ -12,6 +12,7 @@ import 'middleware/cors_middleware.dart';
 import 'middleware/rate_limit_middleware.dart';
 import 'middleware/request_id_middleware.dart';
 import 'repositories/exercise_catalog_repository.dart';
+import 'repositories/moderation_repository.dart';
 import 'repositories/user_repository.dart';
 import 'routes/admin_routes.dart';
 import 'routes/auth_routes.dart';
@@ -19,7 +20,9 @@ import 'routes/coach_routes.dart';
 import 'routes/exercise_catalog_routes.dart';
 import 'routes/invite_routes.dart';
 import 'routes/me_routes.dart';
+import 'routes/moderation_routes.dart';
 import 'routes/sync_routes.dart';
+import 'services/apple_rest_service.dart';
 import 'services/apple_token_service.dart';
 import 'services/email_service.dart';
 import 'services/gif_cache_service.dart';
@@ -32,7 +35,11 @@ import 'utils/logger.dart';
 class GymTrackBackend {
   /// [appleTokenService] n'est à fournir que par les tests (faux jeu de clés
   /// Apple) ; en exécution normale il est construit depuis [config].
-  GymTrackBackend(this.config, {AppleTokenService? appleTokenService})
+  GymTrackBackend(
+    this.config, {
+    AppleTokenService? appleTokenService,
+    AppleRestService? appleRestService,
+  })
       : database = AppDatabase.open(config.databasePath),
         sessionService = SessionService(
           accessTokenTtlDays: config.accessTokenTtlDays,
@@ -43,6 +50,13 @@ class GymTrackBackend {
         ),
         appleTokenService = appleTokenService ??
             AppleTokenService(bundleId: config.appleBundleId),
+        appleRestService = appleRestService ??
+            AppleRestService(
+              clientId: config.appleBundleId,
+              teamId: config.appleTeamId,
+              keyId: config.appleKeyId,
+              privateKey: config.applePrivateKey,
+            ),
         emailService = EmailService(
           apiKey: config.resendApiKey,
           fromEmail: config.resendFromEmail,
@@ -68,15 +82,25 @@ class GymTrackBackend {
       database: database,
       sessionService: sessionService,
     );
+    moderationRepository = ModerationRepository(database: database);
     authRoutes = AuthRoutes(
       googleTokenService: googleTokenService,
       appleTokenService: this.appleTokenService,
+      appleRestService: this.appleRestService,
       userRepository: userRepository,
       authLimiter: _authLimiter,
       emailService: emailService,
     );
-    meRoutes = MeRoutes(userRepository: userRepository);
+    meRoutes = MeRoutes(
+      userRepository: userRepository,
+      appleRestService: this.appleRestService,
+    );
+    moderationRoutes = ModerationRoutes(
+      userRepository: userRepository,
+      moderation: moderationRepository,
+    );
     adminRoutes = AdminRoutes(
+      moderation: moderationRepository,
       database: database,
       adminSecret: config.adminSecret,
       adminLimiter: _adminLimiter,
@@ -86,8 +110,16 @@ class GymTrackBackend {
       database: database,
       photosDir: p.join(p.dirname(config.databasePath), 'coach_photos'),
     );
-    inviteRoutes = InviteRoutes(userRepository: userRepository, database: database);
-    syncRoutes = SyncRoutes(userRepository: userRepository, database: database);
+    inviteRoutes = InviteRoutes(
+      userRepository: userRepository,
+      database: database,
+      moderation: moderationRepository,
+    );
+    syncRoutes = SyncRoutes(
+      userRepository: userRepository,
+      database: database,
+      moderation: moderationRepository,
+    );
     exerciseCatalogRepository = ExerciseCatalogRepository(database: database);
     workoutXService = WorkoutXService(
       apiKey: config.workoutXApiKey,
@@ -158,11 +190,14 @@ class GymTrackBackend {
   final SessionService sessionService;
   final GoogleTokenService googleTokenService;
   final AppleTokenService appleTokenService;
+  final AppleRestService appleRestService;
   final EmailService emailService;
   final RateLimiter _globalLimiter;
   final RateLimiter _authLimiter;
   final RateLimiter _adminLimiter;
   late final UserRepository userRepository;
+  late final ModerationRepository moderationRepository;
+  late final ModerationRoutes moderationRoutes;
   late final AuthRoutes authRoutes;
   late final MeRoutes meRoutes;
   late final AdminRoutes adminRoutes;
@@ -195,8 +230,17 @@ class GymTrackBackend {
     router.put('/me/fitness-goal', meRoutes.updateFitnessGoal);
     router.delete('/me', meRoutes.deleteAccount);
 
+    // ── Modération : signaler / bloquer (App Store, guideline 1.2) ──────────
+    router.get('/community/blocks', moderationRoutes.listBlocked);
+    router.post('/community/blocks', moderationRoutes.block);
+    router.delete('/community/blocks/<userId>', moderationRoutes.unblock);
+    router.post('/community/reports', moderationRoutes.report);
+
     // ── Admin ──────────────────────────────────────────────────────────────
     router.put('/admin/users/<userId>/set-coach', adminRoutes.setCoach);
+    router.get('/admin/reports', adminRoutes.listReports);
+    router.post('/admin/reports/<reportId>/resolve', adminRoutes.resolveReport);
+    router.delete('/admin/users/<userId>', adminRoutes.deleteUser);
     router.get('/admin/users/<userId>/workouts', adminRoutes.listUserWorkouts);
     router.delete('/admin/users/<userId>/workouts/<workoutId>', adminRoutes.deleteUserWorkout);
     router.delete('/admin/users/<userId>/workouts', adminRoutes.deleteAllUserWorkouts);
@@ -293,17 +337,18 @@ class GymTrackBackend {
         .addHandler(router.call);
   }
 
-  // iOS reste à compléter : remplacer TEAMID.com.gymtrack.app par le vrai
-  // "<Apple Team ID>.<bundle id>" dès qu'un compte Apple Developer existe —
-  // voir memory project_pending_deeplink_config. Android est renseigné
-  // (empreinte SHA-256 de la clé de signature d'application Play App Signing).
+  // iOS : "<Apple Team ID>.<bundle id>". Pour que iOS ouvre réellement l'app,
+  // elle doit aussi déclarer l'entitlement Associated Domains
+  // (applinks:gymtrack-backend-2.fly.dev), pas encore fait côté app. Android
+  // est renseigné (empreinte SHA-256 de la clé de signature d'application
+  // Play App Signing).
   Response _appleAppSiteAssociationHandler(Request request) {
     return jsonResponse({
       'applinks': {
         'apps': [],
         'details': [
           {
-            'appID': 'TEAMID.com.gymtrack.app',
+            'appID': 'S869NWC695.com.gymarena.app',
             'paths': ['/invite/*'],
           },
         ],
@@ -339,6 +384,7 @@ class GymTrackBackend {
   Future<void> close() async {
     googleTokenService.close();
     appleTokenService.close();
+    appleRestService.close();
     workoutXService.close();
     database.close();
   }

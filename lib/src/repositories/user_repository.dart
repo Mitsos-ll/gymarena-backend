@@ -276,12 +276,35 @@ class UserRepository {
   /// Supprime définitivement le compte associé à [accessToken] et toutes ses
   /// données (workouts, programmes, partages, liens coach/athlète...) via les
   /// contraintes ON DELETE CASCADE déclarées sur users(id). Irréversible.
-  void deleteAccount(String accessToken) {
+  ///
+  /// Retourne le refresh token Sign in with Apple du compte s'il en a un : il
+  /// disparaît avec la ligne supprimée, et l'appelant doit le révoquer chez
+  /// Apple (exigence de l'App Store).
+  String? deleteAccount(String accessToken) {
     final sessionRow = _findActiveSessionByAccessToken(accessToken);
     if (sessionRow == null) throw ApiException('Unauthorized.', statusCode: 401);
 
     final userId = sessionRow['user_id'] as String;
+    final appleRefreshToken = findProviderRefreshToken(userId, OAuthProvider.apple);
     _database.raw.execute('DELETE FROM users WHERE id = ?', [userId]);
+    return appleRefreshToken;
+  }
+
+  void saveProviderRefreshToken(String userId, OAuthProvider provider, String refreshToken) {
+    _database.raw.execute(
+      'UPDATE user_auth_accounts SET provider_refresh_token=?, updated_at=? WHERE user_id=? AND provider=?',
+      [refreshToken, dbNow(), userId, provider.name],
+    );
+  }
+
+  String? findProviderRefreshToken(String userId, OAuthProvider provider) {
+    final rows = _database.raw.select(
+      'SELECT provider_refresh_token FROM user_auth_accounts WHERE user_id=? AND provider=? LIMIT 1',
+      [userId, provider.name],
+    );
+    if (rows.isEmpty) return null;
+    final token = rows.first['provider_refresh_token'] as String?;
+    return (token == null || token.isEmpty) ? null : token;
   }
 
   // ── Sessions ────────────────────────────────────────────────────────────────

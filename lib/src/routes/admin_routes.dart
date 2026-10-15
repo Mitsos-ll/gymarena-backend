@@ -1,6 +1,7 @@
 import 'package:shelf/shelf.dart';
 import '../db/app_database.dart';
 import '../middleware/rate_limit_middleware.dart';
+import '../repositories/moderation_repository.dart';
 import '../utils/api_exception.dart';
 import '../utils/client_ip.dart';
 import '../utils/http_json.dart';
@@ -9,11 +10,13 @@ import '../utils/secure_compare.dart';
 
 class AdminRoutes {
   AdminRoutes({
+    required this.moderation,
     required this.database,
     required this.adminSecret,
     required RateLimiter adminLimiter,
   }) : _adminLimiter = adminLimiter;
 
+  final ModerationRepository moderation;
   final AppDatabase database;
   final String adminSecret;
   final RateLimiter _adminLimiter;
@@ -92,6 +95,42 @@ class AdminRoutes {
         'total': totalCoaches,
       },
     });
+  }
+
+  // ── Modération ───────────────────────────────────────────────────────────
+
+  /// Signalements d'utilisateurs (`?status=open|resolved`, `open` par défaut).
+  Response listReports(Request request) {
+    final denied = _guard(request, 'GET /admin/reports');
+    if (denied != null) return denied;
+
+    final status = request.url.queryParameters['status'] ?? 'open';
+    final reports = moderation.listReports(status: status);
+    return jsonResponse({'reports': reports, 'total': reports.length});
+  }
+
+  Response resolveReport(Request request, String reportId) {
+    final denied = _guard(request, 'POST /admin/reports/<reportId>/resolve');
+    if (denied != null) return denied;
+
+    if (!moderation.resolveReport(reportId)) {
+      return errorResponse('Report not found.', statusCode: 404);
+    }
+    return jsonResponse({'resolved': true, 'reportId': reportId});
+  }
+
+  /// Supprime définitivement un compte (et ses données, par cascade) — la
+  /// sanction pour un utilisateur signalé à juste titre.
+  Response deleteUser(Request request, String userId) {
+    final denied = _guard(request, 'DELETE /admin/users/<userId>');
+    if (denied != null) return denied;
+
+    database.raw.execute('DELETE FROM users WHERE id=?', [userId]);
+    if (database.raw.updatedRows == 0) {
+      return errorResponse('User not found.', statusCode: 404);
+    }
+    logInfo('Admin deleted user', extra: {'userId': userId});
+    return jsonResponse({'deleted': true, 'userId': userId});
   }
 
   Response listUserWorkouts(Request request, String userId) {

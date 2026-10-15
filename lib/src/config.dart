@@ -7,6 +7,9 @@ class AppConfig {
     required this.databasePath,
     required this.googleWebClientId,
     required this.appleBundleId,
+    this.appleTeamId = '',
+    this.appleKeyId = '',
+    this.applePrivateKey = '',
     required this.accessTokenTtlDays,
     required this.refreshTokenTtlDays,
     required this.corsAllowedOrigins,
@@ -26,6 +29,13 @@ class AppConfig {
   final String databasePath;
   final String googleWebClientId;
   final String appleBundleId;
+
+  /// Clé « Sign in with Apple » (developer.apple.com → Keys). Optionnels :
+  /// sans eux, la révocation du lien Apple à la suppression d'un compte est
+  /// simplement désactivée.
+  final String appleTeamId;
+  final String appleKeyId;
+  final String applePrivateKey;
   final int accessTokenTtlDays;
   final int refreshTokenTtlDays;
   final List<String> corsAllowedOrigins;
@@ -79,6 +89,9 @@ class AppConfig {
       databasePath: get('DATABASE_PATH', 'data/gymtrack.db'),
       googleWebClientId: require('GOOGLE_WEB_CLIENT_ID'),
       appleBundleId: get('APPLE_BUNDLE_ID', 'com.gymarena.app'),
+      appleTeamId: get('APPLE_TEAM_ID', ''),
+      appleKeyId: get('APPLE_KEY_ID', ''),
+      applePrivateKey: get('APPLE_PRIVATE_KEY', ''),
       accessTokenTtlDays: getInt('ACCESS_TOKEN_TTL_DAYS', 30),
       refreshTokenTtlDays: getInt('REFRESH_TOKEN_TTL_DAYS', 90),
       corsAllowedOrigins: corsOrigins,

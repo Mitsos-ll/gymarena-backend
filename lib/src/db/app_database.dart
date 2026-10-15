@@ -24,6 +24,7 @@ class AppDatabase {
     final instance = AppDatabase._(db);
     instance._createSchema();
     instance._migrateUserAuthAccountsIfNeeded();
+    instance._addColumnIfMissing('user_auth_accounts', 'provider_refresh_token', 'TEXT');
     instance._migrateAuthSessionsToHashedTokensIfNeeded();
     instance._migrateRelationsIfNeeded();
     instance._migrateCoachInviteRequestsIfNeeded();
@@ -544,6 +545,34 @@ class AppDatabase {
     ''');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_relations_a ON social_relations(user_id_a);');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_relations_b ON social_relations(user_id_b);');
+
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS user_blocks (
+        blocker_id TEXT NOT NULL,
+        blocked_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (blocker_id, blocked_id),
+        FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id);');
+
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS user_reports (
+        id TEXT PRIMARY KEY,
+        reporter_id TEXT NOT NULL,
+        reported_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        details TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (reported_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_user_reports_status ON user_reports(status, created_at);');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_user_reports_reporter ON user_reports(reporter_id, created_at);');
 
     _db.execute('''
       CREATE TABLE IF NOT EXISTS workout_shares (

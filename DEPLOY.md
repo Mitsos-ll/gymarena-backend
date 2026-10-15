@@ -52,6 +52,9 @@ La base SQLite est persistée dans un volume Docker (`gymtrack_data`).
 |---|---|---|
 | `GOOGLE_WEB_CLIENT_ID` | — | ✅ |
 | `APPLE_BUNDLE_ID` | `com.gymarena.app` | |
+| `APPLE_TEAM_ID` | — | (révocation Apple) |
+| `APPLE_KEY_ID` | — | (révocation Apple) |
+| `APPLE_PRIVATE_KEY` | — | (révocation Apple) |
 | `ENV` | `development` | |
 | `PORT` | `3000` | |
 | `DATABASE_PATH` | `data/gymtrack.db` | |
@@ -71,7 +74,13 @@ La base SQLite est persistée dans un volume Docker (`gymtrack_data`).
 |---|---|---|---|
 | GET | `/health` | Non | Status du serveur |
 | POST | `/auth/google` | Non | Connexion Google OAuth |
-| POST | `/auth/apple` | Non | Connexion Sign in with Apple (`identityToken`, `nonce`, `fullName` optionnel) |
+| POST | `/auth/apple` | Non | Connexion Sign in with Apple (`identityToken`, `nonce`, `fullName` et `authorizationCode` optionnels) |
+| GET / POST | `/community/blocks` | Bearer | Lister / bloquer un utilisateur |
+| DELETE | `/community/blocks/<userId>` | Bearer | Débloquer |
+| POST | `/community/reports` | Bearer | Signaler un utilisateur (`userId`, `reason`, `details`) |
+| GET | `/admin/reports` | Admin | Signalements ouverts (`?status=resolved` pour les traités) |
+| POST | `/admin/reports/<id>/resolve` | Admin | Marquer un signalement comme traité |
+| DELETE | `/admin/users/<userId>` | Admin | Supprimer un compte signalé |
 | POST | `/auth/register` | Non | Inscription email/password |
 | POST | `/auth/login` | Non | Connexion email/password |
 | POST | `/auth/refresh` | Non | Renouveler les tokens |

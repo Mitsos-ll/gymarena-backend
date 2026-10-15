@@ -4,18 +4,24 @@ import 'package:shelf/shelf.dart';
 import 'package:uuid/uuid.dart';
 
 import '../db/app_database.dart';
+import '../repositories/moderation_repository.dart';
 import '../repositories/user_repository.dart';
 import '../utils/api_exception.dart';
 import '../utils/auth_helper.dart';
 import '../utils/http_json.dart';
 
 class SyncRoutes {
-  SyncRoutes({required UserRepository userRepository, required AppDatabase database})
-      : _repo = userRepository,
-        _db = database;
+  SyncRoutes({
+    required UserRepository userRepository,
+    required AppDatabase database,
+    required ModerationRepository moderation,
+  })  : _repo = userRepository,
+        _db = database,
+        _moderation = moderation;
 
   final UserRepository _repo;
   final AppDatabase _db;
+  final ModerationRepository _moderation;
   final _uuid = const Uuid();
 
   /// Résout l'id backend (UUID) pour une entité scopée par utilisateur via
@@ -887,13 +893,16 @@ class SyncRoutes {
 
   Future<Response> lookupUserByDisplayName(Request request) async {
     try {
-      requireAuth(request, _repo);
+      final session = requireAuth(request, _repo);
       final displayName = request.url.queryParameters['displayName']?.trim() ?? '';
       if (displayName.isEmpty) {
         throw ApiException('displayName is required.', statusCode: 400);
       }
       final user = _repo.findByDisplayName(displayName);
-      if (user == null) throw ApiException('User not found.', statusCode: 404);
+      // Un blocage rend l'autre introuvable, dans les deux sens.
+      if (user == null || _moderation.areBlocked(session.user.id, user.id)) {
+        throw ApiException('User not found.', statusCode: 404);
+      }
       return jsonResponse({'id': user.id, 'displayName': user.displayName});
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
@@ -914,6 +923,11 @@ class SyncRoutes {
       // Verify target user exists
       final targetRows = _db.raw.select('SELECT id FROM users WHERE id=? AND is_deleted=0', [userIdB]);
       if (targetRows.isEmpty) throw ApiException('User not found.', statusCode: 404);
+      // Pas de demande vers (ou depuis) un utilisateur bloqué : même réponse
+      // qu'un compte inexistant, pour ne pas révéler le blocage.
+      if (_moderation.areBlocked(userIdA, userIdB)) {
+        throw ApiException('User not found.', statusCode: 404);
+      }
 
       final now = dbNow();
       final status = body['status']?.toString() ?? 'friend';

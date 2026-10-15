@@ -146,3 +146,17 @@ class FakeApple {
     return builder.build().toCompactSerialization();
   }
 }
+
+/// Clé EC P-256 jetable au format PKCS#8, comme les fichiers `.p8` d'Apple.
+const testApplePem = '''-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgr6qt56UNoUmzrT1X
+DUGDlgU8viC1ExsHN9F0yMuLl9qhRANCAARUeDerZrQ4cGIlS4ieygsHxfXiIh9R
+jqiZUQAF/5HIpiOmRb90uX+Q+ydHHtyW3lG6hSxdUhFcz3e2Ef3kkaxL
+-----END PRIVATE KEY-----''';
+
+/// JWT non signé dont seul le payload compte (c'est tout ce que lit le code).
+String fakeIdToken(String subject) {
+  String encode(Object value) =>
+      base64Url.encode(utf8.encode(jsonEncode(value))).replaceAll('=', '');
+  return '${encode({'alg': 'RS256'})}.${encode({'sub': subject})}.sig';
+}

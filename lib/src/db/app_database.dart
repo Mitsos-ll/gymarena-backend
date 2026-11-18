@@ -321,6 +321,13 @@ class AppDatabase {
     // device) car jamais persistées côté serveur.
     _addColumnIfMissing('workout_sets', 'bodyweight_kg', 'REAL');
     _addColumnIfMissing('workout_sets', 'added_weight_kg', 'REAL');
+    // Métriques cardio et durée des exercices de maintien (gainage) : jamais
+    // reçues avant que l'app ne les envoie, une séance de course revenait
+    // sans distance ni durée après une restauration.
+    _addColumnIfMissing('workout_sets', 'distance_m', 'REAL');
+    _addColumnIfMissing('workout_sets', 'effort_seconds', 'INTEGER');
+    _addColumnIfMissing('workout_sets', 'speed_m_per_s', 'REAL');
+    _addColumnIfMissing('workout_sets', 'calories', 'REAL');
 
     // Détail gauche/droite pour les exercices unilatéraux — même besoin que
     // ci-dessus, cette table n'existait pas du tout côté serveur.

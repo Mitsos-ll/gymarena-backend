@@ -137,7 +137,7 @@ class SyncRoutes {
       for (final p in programs) {
         final programId = p['id'] as String;
         final sessions = _db.raw.select(
-          'SELECT ps.*, pe.id as pe_id, pe.exercise_id, pe.exercise_name_snapshot, pe.exercise_order, pe.target_sets, pe.target_reps_min, pe.target_reps_max, pe.target_rpe, pe.progression_step_kg '
+          'SELECT ps.*, pe.id as pe_id, pe.exercise_id, pe.exercise_name_snapshot, pe.exercise_order, pe.target_sets, pe.target_reps, pe.target_reps_min, pe.target_reps_max, pe.target_rpe, pe.progression_step_kg, pe.notes, pe.rest_seconds '
           'FROM program_sessions ps LEFT JOIN program_exercises pe ON pe.program_session_id=ps.id '
           'WHERE ps.program_id=? ORDER BY ps.session_order, pe.exercise_order',
           [programId],
@@ -159,16 +159,20 @@ class SyncRoutes {
               'exerciseNameSnapshot': row['exercise_name_snapshot'],
               'exerciseOrder': row['exercise_order'],
               'targetSets': row['target_sets'],
+              'targetReps': row['target_reps'],
               'targetRepsMin': row['target_reps_min'],
               'targetRepsMax': row['target_reps_max'],
               'targetRpe': row['target_rpe'],
               'progressionStepKg': row['progression_step_kg'],
+              'notes': row['notes'],
+              'restSeconds': row['rest_seconds'],
             });
           }
         }
         programList.add({
           'id': programId,
           'localId': p['local_id'],
+          'code': p['code'],
           'name': p['name'],
           'description': p['description'],
           'daysPerWeek': p['days_per_week'],
@@ -240,10 +244,34 @@ class SyncRoutes {
         [userId],
       );
 
+      // Retours du coach sur les séances de l'athlète : note et/ou date à
+      // laquelle il a ouvert la séance. Rattachés par l'id local de la
+      // séance, le seul que l'app connaisse.
+      final coachFeedback = _db.raw.select(
+        'SELECT w.local_id, k.coach_user_id, n.note_text, n.updated_at AS note_updated_at, v.seen_at, '
+        'COALESCE(cp.display_name, u.display_name) AS coach_name '
+        'FROM (SELECT coach_user_id, workout_id FROM coach_workout_notes WHERE athlete_user_id=? '
+        '      UNION SELECT coach_user_id, workout_id FROM coach_workout_views WHERE athlete_user_id=?) k '
+        'JOIN workouts w ON w.id=k.workout_id AND w.user_id=? AND w.local_id IS NOT NULL '
+        'JOIN users u ON u.id=k.coach_user_id '
+        'LEFT JOIN coach_public_profiles cp ON cp.coach_user_id=k.coach_user_id '
+        'LEFT JOIN coach_workout_notes n ON n.coach_user_id=k.coach_user_id AND n.workout_id=k.workout_id '
+        'LEFT JOIN coach_workout_views v ON v.coach_user_id=k.coach_user_id AND v.workout_id=k.workout_id',
+        [userId, userId, userId],
+      );
+
       return jsonResponse({
         'userId': userId,
         'generatedAt': dbNow(),
         'workouts': workoutList,
+        'coachFeedback': coachFeedback.map((r) => {
+          'workoutLocalId': r['local_id'],
+          'coachUserId': r['coach_user_id'],
+          'coachName': r['coach_name'],
+          'noteText': r['note_text'],
+          'noteUpdatedAt': r['note_updated_at'],
+          'seenAt': r['seen_at'],
+        }).toList(),
         'exercises': exercises.map((e) => _exerciseRowToJson(e)).toList(),
         'programs': programList,
         'sessionTemplates': sessionTemplateList,
@@ -326,6 +354,68 @@ class SyncRoutes {
     }
   }
 
+  /// Écrit une séance complète (ligne, exercices, séries, côtés) depuis le
+  /// payload de l'app et renvoie son id serveur.
+  ///
+  /// Les exercices/séries sont toujours envoyés en intégralité à chaque
+  /// push : on repart d'une table enfant vide (cascade) puis on ré-insère
+  /// avec des UUID frais, ce qui évite toute collision d'id enfant entre deux
+  /// comptes différents.
+  String _upsertWorkout(String userId, Map<String, dynamic> item, String now) {
+    final id = _resolveScopedId('workouts', userId, item['localId']);
+    _db.raw.execute(
+      'INSERT OR REPLACE INTO workouts (id, user_id, local_id, workout_date, start_time, end_time, duration_seconds, bodyweight_kg_snapshot, notes, '
+      'program_name, program_session_name, session_template_name, created_at, updated_at) '
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '
+      // Une app antérieure à l'envoi de l'origine, ou une séance restaurée
+      // dont le lien local s'est perdu, n'efface pas l'origine déjà connue.
+      'COALESCE(?, (SELECT program_name FROM workouts WHERE id=?)), '
+      'COALESCE(?, (SELECT program_session_name FROM workouts WHERE id=?)), '
+      'COALESCE(?, (SELECT session_template_name FROM workouts WHERE id=?)), '
+      'COALESCE((SELECT created_at FROM workouts WHERE id=?), ?), ?)',
+      [
+        id, userId, item['localId'],
+        item['workoutDate'] ?? now.substring(0, 10),
+        item['startTime'], item['endTime'],
+        item['durationSeconds'] ?? 0,
+        item['bodyweightKgSnapshot'], item['notes'],
+        item['programName'], id,
+        item['programSessionName'], id,
+        item['sessionTemplateName'], id,
+        id, now, now,
+      ],
+    );
+
+    _db.raw.execute('DELETE FROM workout_exercises WHERE workout_id=?', [id]);
+    final exercises = (item['exercises'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    for (final ex in exercises) {
+      final weId = _uuid.v4();
+      _db.raw.execute(
+        'INSERT INTO workout_exercises (id, workout_id, exercise_id, exercise_name_snapshot, muscle_group_name_snapshot, exercise_order, notes, created_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [weId, id, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['muscleGroupNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['notes'], now],
+      );
+      final sets = (ex['sets'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      for (final s in sets) {
+        final wsId = _uuid.v4();
+        _db.raw.execute(
+          'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, volume_reps, rpe, rest_time_seconds, estimated_1rm, bodyweight_kg, added_weight_kg, distance_m, effort_seconds, speed_m_per_s, calories, set_type, created_at) '
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['volumeReps'] ?? s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['bodyweightKg'], s['addedWeightKg'], s['distanceM'], s['effortSeconds'], s['speedMs'], s['calories'], s['setType'] ?? 'normal', now],
+        );
+        final sides = (s['sides'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+        for (final side in sides) {
+          _db.raw.execute(
+            'INSERT INTO workout_set_sides (id, workout_set_id, side, reps, rpe, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            [_uuid.v4(), wsId, side['side'], side['reps'] ?? 0, side['rpe'], now],
+          );
+        }
+      }
+    }
+    return id;
+  }
+
   // ── POST /workouts/batch ─────────────────────────────────────────────────
 
   Future<Response> pushWorkoutBatch(Request request) async {
@@ -338,52 +428,7 @@ class SyncRoutes {
       final ids = <String>[];
 
       for (final item in items) {
-        final id = _resolveScopedId('workouts', userId, item['localId']);
-        _db.raw.execute(
-          'INSERT OR REPLACE INTO workouts (id, user_id, local_id, workout_date, start_time, end_time, duration_seconds, bodyweight_kg_snapshot, notes, created_at, updated_at) '
-          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM workouts WHERE id=?), ?), ?)',
-          [
-            id, userId, item['localId'],
-            item['workoutDate'] ?? now.substring(0, 10),
-            item['startTime'], item['endTime'],
-            item['durationSeconds'] ?? 0,
-            item['bodyweightKgSnapshot'], item['notes'],
-            id, now, now,
-          ],
-        );
-
-        // Les exercices/séries sont toujours envoyés en intégralité à chaque
-        // push : on repart d'une table enfant vide (cascade) puis on
-        // ré-insère avec des UUID frais, ce qui évite toute collision d'id
-        // enfant entre deux comptes différents.
-        _db.raw.execute('DELETE FROM workout_exercises WHERE workout_id=?', [id]);
-        final exercises = (item['exercises'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-        for (final ex in exercises) {
-          final weId = _uuid.v4();
-          _db.raw.execute(
-            'INSERT INTO workout_exercises (id, workout_id, exercise_id, exercise_name_snapshot, muscle_group_name_snapshot, exercise_order, notes, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [weId, id, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['muscleGroupNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['notes'], now],
-          );
-          final sets = (ex['sets'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-          for (final s in sets) {
-            final wsId = _uuid.v4();
-            _db.raw.execute(
-              'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, volume_reps, rpe, rest_time_seconds, estimated_1rm, bodyweight_kg, added_weight_kg, distance_m, effort_seconds, speed_m_per_s, calories, set_type, created_at) '
-              'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['volumeReps'] ?? s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['bodyweightKg'], s['addedWeightKg'], s['distanceM'], s['effortSeconds'], s['speedMs'], s['calories'], s['setType'] ?? 'normal', now],
-            );
-            final sides = (s['sides'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-            for (final side in sides) {
-              _db.raw.execute(
-                'INSERT INTO workout_set_sides (id, workout_set_id, side, reps, rpe, created_at) '
-                'VALUES (?, ?, ?, ?, ?, ?)',
-                [_uuid.v4(), wsId, side['side'], side['reps'] ?? 0, side['rpe'], now],
-              );
-            }
-          }
-        }
-        ids.add(id);
+        ids.add(_upsertWorkout(userId, item, now));
       }
 
       return jsonResponse({'synced': ids.length, 'ids': ids, 'syncedAt': now});
@@ -400,54 +445,8 @@ class SyncRoutes {
       final userId = session.user.id;
       final body = await readJsonBody(request);
 
-      final id = _resolveScopedId('workouts', userId, body['localId']);
       final now = dbNow();
-
-      _db.raw.execute(
-        'INSERT OR REPLACE INTO workouts (id, user_id, local_id, workout_date, start_time, end_time, duration_seconds, bodyweight_kg_snapshot, notes, created_at, updated_at) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM workouts WHERE id=?), ?), ?)',
-        [
-          id, userId,
-          body['localId'],
-          body['workoutDate'] ?? now.substring(0, 10),
-          body['startTime'],
-          body['endTime'],
-          body['durationSeconds'] ?? 0,
-          body['bodyweightKgSnapshot'],
-          body['notes'],
-          id, now, now,
-        ],
-      );
-
-      _db.raw.execute('DELETE FROM workout_exercises WHERE workout_id=?', [id]);
-      final exercises = (body['exercises'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      for (final ex in exercises) {
-        final weId = _uuid.v4();
-        _db.raw.execute(
-          'INSERT INTO workout_exercises (id, workout_id, exercise_id, exercise_name_snapshot, muscle_group_name_snapshot, exercise_order, notes, created_at) '
-          'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [weId, id, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['muscleGroupNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['notes'], now],
-        );
-
-        final sets = (ex['sets'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-        for (final s in sets) {
-          final wsId = _uuid.v4();
-          _db.raw.execute(
-            'INSERT INTO workout_sets (id, workout_exercise_id, set_number, weight_kg, reps, volume_reps, rpe, rest_time_seconds, estimated_1rm, bodyweight_kg, added_weight_kg, distance_m, effort_seconds, speed_m_per_s, calories, set_type, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [wsId, weId, s['setNumber'] ?? 1, s['weightKg'] ?? 0, s['reps'] ?? 0, s['volumeReps'] ?? s['reps'] ?? 0, s['rpe'], s['restTimeSeconds'], s['estimated1Rm'], s['bodyweightKg'], s['addedWeightKg'], s['distanceM'], s['effortSeconds'], s['speedMs'], s['calories'], s['setType'] ?? 'normal', now],
-          );
-          final sides = (s['sides'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-          for (final side in sides) {
-            _db.raw.execute(
-              'INSERT INTO workout_set_sides (id, workout_set_id, side, reps, rpe, created_at) '
-              'VALUES (?, ?, ?, ?, ?, ?)',
-              [_uuid.v4(), wsId, side['side'], side['reps'] ?? 0, side['rpe'], now],
-            );
-          }
-        }
-      }
-
+      final id = _upsertWorkout(userId, body, now);
       return jsonResponse({'id': id, 'syncedAt': now});
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
@@ -459,10 +458,18 @@ class SyncRoutes {
   Future<Response> deleteWorkout(Request request, String localId) async {
     try {
       final session = requireAuth(request, _repo);
-      _db.raw.execute(
-        'DELETE FROM workouts WHERE user_id=? AND local_id=?',
+      final rows = _db.raw.select(
+        'SELECT id FROM workouts WHERE user_id=? AND local_id=?',
         [session.user.id, localId],
       );
+      for (final row in rows) {
+        final workoutId = row['id'] as String;
+        // Ni les notes ni les vues du coach n'ont de clé étrangère vers la
+        // séance (voir coach_workout_views) : on les retire avec elle.
+        _db.raw.execute('DELETE FROM coach_workout_notes WHERE workout_id=?', [workoutId]);
+        _db.raw.execute('DELETE FROM coach_workout_views WHERE workout_id=?', [workoutId]);
+        _db.raw.execute('DELETE FROM workouts WHERE id=?', [workoutId]);
+      }
       return Response(204);
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
@@ -552,47 +559,56 @@ class SyncRoutes {
       final ids = <String>[];
 
       for (final item in items) {
-        final id = _resolveScopedId('programs', userId, item['localId']);
-        _db.raw.execute(
-          'INSERT OR REPLACE INTO programs (id, user_id, local_id, name, description, days_per_week, deload_every_n_weeks, progression_step_kg, created_at, updated_at) '
-          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM programs WHERE id=?), ?), ?)',
-          [
-            id, userId, item['localId'],
-            item['name'] ?? 'Programme', item['description'],
-            item['daysPerWeek'], item['deloadEveryNWeeks'], item['progressionStepKg'],
-            id, now, now,
-          ],
-        );
-
-        // Séances/exercices toujours envoyés en intégralité : on repart
-        // d'une table enfant vide (cascade) puis on ré-insère avec des UUID
-        // frais, ce qui évite toute collision d'id enfant entre comptes.
-        _db.raw.execute('DELETE FROM program_sessions WHERE program_id=?', [id]);
-        final sessions = (item['sessions'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-        for (final s in sessions) {
-          final psId = _uuid.v4();
-          _db.raw.execute(
-            'INSERT INTO program_sessions (id, program_id, name, session_order, day_of_week, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?)',
-            [psId, id, s['name'] ?? 'Séance', s['sessionOrder'] ?? 0, s['dayOfWeek'], now],
-          );
-          final exercises = (s['exercises'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-          for (final ex in exercises) {
-            final peId = _uuid.v4();
-            _db.raw.execute(
-              'INSERT INTO program_exercises (id, program_session_id, exercise_id, exercise_name_snapshot, exercise_order, target_sets, target_reps_min, target_reps_max, target_rpe, progression_step_kg, created_at) '
-              'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [peId, psId, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['targetSets'], ex['targetRepsMin'], ex['targetRepsMax'], ex['targetRpe'], ex['progressionStepKg'], now],
-            );
-          }
-        }
-        ids.add(id);
+        ids.add(_upsertProgram(userId, item, now));
       }
 
       return jsonResponse({'synced': ids.length, 'ids': ids, 'syncedAt': now});
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
     }
+  }
+
+  /// Écrit un programme complet (ligne, séances, exercices) depuis le
+  /// payload de l'app et renvoie son id serveur. Séances/exercices toujours
+  /// envoyés en intégralité : on repart d'une table enfant vide (cascade)
+  /// puis on ré-insère avec des UUID frais, ce qui évite toute collision
+  /// d'id enfant entre comptes.
+  String _upsertProgram(String userId, Map<String, dynamic> item, String now) {
+    final id = _resolveScopedId('programs', userId, item['localId']);
+    _db.raw.execute(
+      'INSERT OR REPLACE INTO programs (id, user_id, local_id, code, name, description, days_per_week, deload_every_n_weeks, progression_step_kg, created_at, updated_at) '
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM programs WHERE id=?), ?), ?)',
+      [
+        id, userId, item['localId'], item['code'],
+        item['name'] ?? 'Programme', item['description'],
+        item['daysPerWeek'], item['deloadEveryNWeeks'], item['progressionStepKg'],
+        id, now, now,
+      ],
+    );
+
+    _db.raw.execute('DELETE FROM program_sessions WHERE program_id=?', [id]);
+    final sessions = (item['sessions'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    for (final s in sessions) {
+      final psId = _uuid.v4();
+      _db.raw.execute(
+        'INSERT INTO program_sessions (id, program_id, name, session_order, day_of_week, created_at) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        [psId, id, s['name'] ?? 'Séance', s['sessionOrder'] ?? 0, s['dayOfWeek'], now],
+      );
+      final exercises = (s['exercises'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      for (final ex in exercises) {
+        _db.raw.execute(
+          'INSERT INTO program_exercises (id, program_session_id, exercise_id, exercise_name_snapshot, exercise_order, target_sets, target_reps, target_reps_min, target_reps_max, target_rpe, progression_step_kg, notes, rest_seconds, created_at) '
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            _uuid.v4(), psId, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['exerciseOrder'] ?? 0,
+            ex['targetSets'], ex['targetReps'], ex['targetRepsMin'], ex['targetRepsMax'], ex['targetRpe'],
+            ex['progressionStepKg'], ex['notes'], ex['restSeconds'], now,
+          ],
+        );
+      }
+    }
+    return id;
   }
 
   // ── POST /programs ────────────────────────────────────────────────────────
@@ -603,43 +619,8 @@ class SyncRoutes {
       final userId = session.user.id;
       final body = await readJsonBody(request);
 
-      final id = _resolveScopedId('programs', userId, body['localId']);
       final now = dbNow();
-
-      _db.raw.execute(
-        'INSERT OR REPLACE INTO programs (id, user_id, local_id, name, description, days_per_week, deload_every_n_weeks, progression_step_kg, created_at, updated_at) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM programs WHERE id=?), ?), ?)',
-        [
-          id, userId, body['localId'],
-          body['name'] ?? 'Programme',
-          body['description'],
-          body['daysPerWeek'],
-          body['deloadEveryNWeeks'],
-          body['progressionStepKg'],
-          id, now, now,
-        ],
-      );
-
-      _db.raw.execute('DELETE FROM program_sessions WHERE program_id=?', [id]);
-      final sessions = (body['sessions'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      for (final s in sessions) {
-        final psId = _uuid.v4();
-        _db.raw.execute(
-          'INSERT INTO program_sessions (id, program_id, name, session_order, day_of_week, created_at) '
-          'VALUES (?, ?, ?, ?, ?, ?)',
-          [psId, id, s['name'] ?? 'Séance', s['sessionOrder'] ?? 0, s['dayOfWeek'], now],
-        );
-
-        final exercises = (s['exercises'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-        for (final ex in exercises) {
-          final peId = _uuid.v4();
-          _db.raw.execute(
-            'INSERT INTO program_exercises (id, program_session_id, exercise_id, exercise_name_snapshot, exercise_order, target_sets, target_reps_min, target_reps_max, target_rpe, progression_step_kg, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [peId, psId, ex['exerciseId'], ex['exerciseNameSnapshot'], ex['exerciseOrder'] ?? 0, ex['targetSets'], ex['targetRepsMin'], ex['targetRepsMax'], ex['targetRpe'], ex['progressionStepKg'], now],
-          );
-        }
-      }
+      final id = _upsertProgram(userId, body, now);
 
       return jsonResponse({'id': id, 'syncedAt': now});
     } on ApiException catch (e) {

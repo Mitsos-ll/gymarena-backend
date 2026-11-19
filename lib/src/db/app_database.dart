@@ -29,6 +29,7 @@ class AppDatabase {
     instance._migrateRelationsIfNeeded();
     instance._migrateCoachInviteRequestsIfNeeded();
     instance._migrateCoachProgramAssignmentsIfNeeded();
+    instance._migrateCoachWorkoutNotesForeignKeysIfNeeded();
     instance._backfillRevokedCoachProgramAssignments();
     instance._migrateDisplayNameUniquenessIfNeeded();
     instance._reconcileUserProfileDisplayNameMismatchIfNeeded();
@@ -161,7 +162,9 @@ class AppDatabase {
         note_text TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE(coach_user_id, workout_id)
+        UNIQUE(coach_user_id, workout_id),
+        FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (athlete_user_id) REFERENCES users(id) ON DELETE CASCADE
       );
     ''');
 
@@ -228,6 +231,61 @@ class AppDatabase {
       WHERE status='pending';
     ''');
 
+    // Suivi coach : objectif de séances par semaine (assiduité) et délai
+    // d'alerte d'inactivité propres à un athlète. NULL = valeur par défaut
+    // (nombre de séances du programme assigné / réglage du coach).
+    _addColumnIfMissing('coach_athlete_links', 'target_sessions_per_week', 'INTEGER');
+    _addColumnIfMissing('coach_athlete_links', 'inactivity_alert_days', 'INTEGER');
+    _addColumnIfMissing('coach_program_assignments', 'session_count', 'INTEGER');
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS coach_settings (
+        coach_user_id TEXT PRIMARY KEY,
+        inactivity_alert_days INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+
+    // Séances ouvertes par le coach (« Vu par votre coach » côté athlète).
+    // Pas de clé étrangère vers workouts : chaque renvoi d'une séance la
+    // remplace (INSERT OR REPLACE), ce qui viderait la table par cascade.
+    // Le nettoyage se fait à la suppression de la séance.
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS coach_workout_views (
+        coach_user_id TEXT NOT NULL,
+        workout_id TEXT NOT NULL,
+        athlete_user_id TEXT NOT NULL,
+        seen_at TEXT NOT NULL,
+        PRIMARY KEY (coach_user_id, workout_id),
+        FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (athlete_user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_cwv_athlete ON coach_workout_views(athlete_user_id);');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_cwn_athlete ON coach_workout_notes(athlete_user_id);');
+
+    // Spécialités choisies dans une liste fixe (clés), filtrables dans
+    // l'annuaire ; `speciality` (texte libre) n'est plus saisie.
+    _addColumnIfMissing('coach_public_profiles', 'specialities', "TEXT NOT NULL DEFAULT '[]'");
+
+    // Candidatures « devenir coach », validées par l'administrateur seul.
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS coach_applications (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        decided_at TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+    _db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_capp_unique_pending
+      ON coach_applications(user_id)
+      WHERE status='pending';
+    ''');
+
     // ── Invitations d'amis (lien / QR) ──────────────────────────────────────
     // Contrairement au code coach (usage unique), un code d'invitation ami
     // est réutilisable par plusieurs destinataires jusqu'à expiration.
@@ -275,6 +333,13 @@ class AppDatabase {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
     ''');
+    // Origine de la séance (séance d'un programme ou séance enregistrée),
+    // par nom : sert au coach à comparer « Séance A » à la Séance A
+    // précédente. Les ids locaux de ces séances changent à la restauration,
+    // les noms non.
+    _addColumnIfMissing('workouts', 'program_name', 'TEXT');
+    _addColumnIfMissing('workouts', 'program_session_name', 'TEXT');
+    _addColumnIfMissing('workouts', 'session_template_name', 'TEXT');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_workouts_user ON workouts(user_id);');
     _db.execute('CREATE INDEX IF NOT EXISTS idx_workouts_date ON workouts(user_id, workout_date);');
 
@@ -409,6 +474,13 @@ class AppDatabase {
         FOREIGN KEY (program_session_id) REFERENCES program_sessions(id) ON DELETE CASCADE
       );
     ''');
+    // L'app envoie les reps cibles en texte (« 8-12 », « 40-60s ») et non en
+    // min/max : sans cette colonne, elles se perdaient à la restauration,
+    // comme les consignes. Le code du programme garde l'origine « coach ».
+    _addColumnIfMissing('programs', 'code', 'TEXT');
+    _addColumnIfMissing('program_exercises', 'target_reps', 'TEXT');
+    _addColumnIfMissing('program_exercises', 'notes', 'TEXT');
+    _addColumnIfMissing('program_exercises', 'rest_seconds', 'INTEGER');
 
     // ── Sync — Modèles de séance ─────────────────────────────────────────────
     _db.execute('''
@@ -663,6 +735,7 @@ class AppDatabase {
           program_code TEXT,
           program_name TEXT NOT NULL,
           snapshot_json TEXT,
+          session_count INTEGER,
           assigned_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'active',
@@ -739,6 +812,46 @@ class AppDatabase {
         ON coach_invite_requests(coach_user_id, athlete_user_id)
         WHERE status='pending';
       ''');
+      _db.execute('COMMIT;');
+    } catch (e) {
+      _db.execute('ROLLBACK;');
+      rethrow;
+    }
+  }
+
+  /// Les notes du coach n'avaient pas de clé étrangère vers `users` : elles
+  /// survivaient à la suppression du compte du coach ou de l'athlète (RGPD).
+  /// La table est reconstruite avec, sans les notes déjà orphelines.
+  void _migrateCoachWorkoutNotesForeignKeysIfNeeded() {
+    if (_db.select('PRAGMA foreign_key_list(coach_workout_notes);').isNotEmpty) return;
+
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      _db.execute('ALTER TABLE coach_workout_notes RENAME TO coach_workout_notes_old;');
+      _db.execute('''
+        CREATE TABLE coach_workout_notes (
+          id TEXT PRIMARY KEY,
+          coach_user_id TEXT NOT NULL,
+          athlete_user_id TEXT NOT NULL,
+          workout_id TEXT NOT NULL,
+          note_text TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(coach_user_id, workout_id),
+          FOREIGN KEY (coach_user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (athlete_user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      ''');
+      _db.execute('''
+        INSERT INTO coach_workout_notes
+          (id, coach_user_id, athlete_user_id, workout_id, note_text, created_at, updated_at)
+        SELECT id, coach_user_id, athlete_user_id, workout_id, note_text, created_at, updated_at
+        FROM coach_workout_notes_old
+        WHERE coach_user_id IN (SELECT id FROM users)
+          AND athlete_user_id IN (SELECT id FROM users);
+      ''');
+      _db.execute('DROP TABLE coach_workout_notes_old;');
+      _db.execute('CREATE INDEX IF NOT EXISTS idx_cwn_athlete ON coach_workout_notes(athlete_user_id);');
       _db.execute('COMMIT;');
     } catch (e) {
       _db.execute('ROLLBACK;');

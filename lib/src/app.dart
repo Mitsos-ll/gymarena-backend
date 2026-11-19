@@ -39,6 +39,7 @@ class GymTrackBackend {
     this.config, {
     AppleTokenService? appleTokenService,
     AppleRestService? appleRestService,
+    EmailService? emailService,
   })
       : database = AppDatabase.open(config.databasePath),
         sessionService = SessionService(
@@ -57,10 +58,11 @@ class GymTrackBackend {
               keyId: config.appleKeyId,
               privateKey: config.applePrivateKey,
             ),
-        emailService = EmailService(
-          apiKey: config.resendApiKey,
-          fromEmail: config.resendFromEmail,
-        ),
+        emailService = emailService ??
+            EmailService(
+              apiKey: config.resendApiKey,
+              fromEmail: config.resendFromEmail,
+            ),
         _globalLimiter = RateLimiter(
           maxRequests: config.rateLimitMaxRequests,
           windowDuration: Duration(seconds: config.rateLimitWindowSeconds),
@@ -89,7 +91,7 @@ class GymTrackBackend {
       appleRestService: this.appleRestService,
       userRepository: userRepository,
       authLimiter: _authLimiter,
-      emailService: emailService,
+      emailService: this.emailService,
     );
     meRoutes = MeRoutes(
       userRepository: userRepository,
@@ -109,6 +111,8 @@ class GymTrackBackend {
       userRepository: userRepository,
       database: database,
       photosDir: p.join(p.dirname(config.databasePath), 'coach_photos'),
+      emailService: this.emailService,
+      adminNotifyEmail: config.adminNotifyEmail,
     );
     inviteRoutes = InviteRoutes(
       userRepository: userRepository,
@@ -213,6 +217,7 @@ class GymTrackBackend {
     final router = Router();
 
     router.get('/health', _healthHandler);
+    router.get('/config', _configHandler);
     router.get('/admin/stats', adminRoutes.statsHandler);
 
     router.post('/auth/google', authRoutes.signInGoogle);
@@ -238,6 +243,9 @@ class GymTrackBackend {
 
     // ── Admin ──────────────────────────────────────────────────────────────
     router.put('/admin/users/<userId>/set-coach', adminRoutes.setCoach);
+    router.get('/admin/coach-applications', adminRoutes.listCoachApplications);
+    router.post('/admin/coach-applications/<applicationId>/approve', adminRoutes.approveCoachApplication);
+    router.post('/admin/coach-applications/<applicationId>/reject', adminRoutes.rejectCoachApplication);
     router.get('/admin/reports', adminRoutes.listReports);
     router.post('/admin/reports/<reportId>/resolve', adminRoutes.resolveReport);
     router.delete('/admin/users/<userId>', adminRoutes.deleteUser);
@@ -264,7 +272,10 @@ class GymTrackBackend {
     router.get('/coach/athletes', coachRoutes.getAthletes);
     router.delete('/coach/athletes/<athleteUserId>', coachRoutes.removeAthlete);
     router.get('/coach/athletes/<athleteUserId>/detail', coachRoutes.getAthleteDetail);
+    router.put('/coach/athletes/<athleteUserId>/settings', coachRoutes.updateAthleteSettings);
+    router.put('/coach/settings', coachRoutes.updateSettings);
     router.put('/coach/athletes/<athleteUserId>/workouts/<workoutId>/note', coachRoutes.saveNote);
+    router.post('/coach/athletes/<athleteUserId>/workouts/<workoutId>/seen', coachRoutes.markWorkoutSeen);
     router.put('/coach/athletes/<athleteUserId>/program', coachRoutes.assignProgram);
     router.delete('/coach/athletes/<athleteUserId>/program', coachRoutes.removeProgram);
     router.put('/coach/public-profile', coachRoutes.upsertPublicProfile);
@@ -273,6 +284,10 @@ class GymTrackBackend {
     router.get('/coach-photos/<filename>', coachRoutes.servePhoto);
     router.get('/coaches/public', coachRoutes.getPublicCoaches);
     router.get('/athlete/coach', coachRoutes.getMyCoach);
+    router.get('/athlete/invite-request', coachRoutes.getMyInviteRequest);
+    router.delete('/athlete/invite-request', coachRoutes.cancelMyInviteRequest);
+    router.post('/coach/application', coachRoutes.submitApplication);
+    router.get('/coach/application', coachRoutes.getMyApplication);
     router.get('/athlete/assigned-program', coachRoutes.getAssignedProgram);
     router.delete('/athlete/coach', coachRoutes.revokeCoach);
     router.post('/coach/<coachUserId>/invite-requests', coachRoutes.requestInvite);
@@ -370,6 +385,11 @@ class GymTrackBackend {
       },
     ]);
   }
+
+  /// Réglages lus par l'app au démarrage, sans compte : couper le coaching
+  /// ici le masque sans nouvelle version sur les stores.
+  Response _configHandler(Request request) =>
+      jsonResponse({'coachEnabled': config.coachFeatureEnabled});
 
   Response _healthHandler(Request request) {
     return jsonResponse({

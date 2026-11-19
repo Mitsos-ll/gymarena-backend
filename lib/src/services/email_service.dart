@@ -36,27 +36,59 @@ class EmailService {
           'skipping password reset email to $toEmail');
       return;
     }
-
-    final response = await _client.post(
-      Uri.parse(_endpoint),
-      headers: {
-        'Authorization': 'Bearer $_apiKey',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'from': _fromEmail,
-        'to': [toEmail],
-        'subject': 'GymArena — Réinitialisation de votre mot de passe',
-        'html': _buildHtml(code),
-      }),
+    await _send(
+      toEmail: toEmail,
+      subject: 'GymArena — Réinitialisation de votre mot de passe',
+      html: _buildHtml(code),
+      what: 'password reset email',
     );
+  }
 
-    if (response.statusCode >= 400) {
-      logError(
-        'Resend API error while sending password reset email',
-        'HTTP ${response.statusCode}: ${response.body}',
-        null,
+  /// Alerte l'administrateur (nouvelle candidature coach…). Sans clé Resend
+  /// ou sans destinataire configuré, seul le journal en garde trace. En bac
+  /// à sable, Resend n'accepte que l'adresse du titulaire du compte : c'est
+  /// justement celle de l'administrateur.
+  Future<void> sendAdminNotification({
+    required String toEmail,
+    required String subject,
+    required String html,
+  }) async {
+    if (!isConfigured || toEmail.isEmpty) {
+      logInfo('Admin notification not sent (RESEND_API_KEY or ADMIN_NOTIFY_EMAIL missing): $subject');
+      return;
+    }
+    await _send(toEmail: toEmail, subject: subject, html: html, what: 'admin notification');
+  }
+
+  Future<void> _send({
+    required String toEmail,
+    required String subject,
+    required String html,
+    required String what,
+  }) async {
+    try {
+      final response = await _client.post(
+        Uri.parse(_endpoint),
+        headers: {
+          'Authorization': 'Bearer $_apiKey',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'from': _fromEmail,
+          'to': [toEmail],
+          'subject': subject,
+          'html': html,
+        }),
       );
+      if (response.statusCode >= 400) {
+        logError(
+          'Resend API error while sending $what',
+          'HTTP ${response.statusCode}: ${response.body}',
+          null,
+        );
+      }
+    } catch (e, s) {
+      logError('Resend unreachable while sending $what', e, s);
     }
   }
 

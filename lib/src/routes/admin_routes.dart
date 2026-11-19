@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:shelf/shelf.dart';
 import '../db/app_database.dart';
 import '../middleware/rate_limit_middleware.dart';
@@ -79,6 +81,10 @@ class AdminRoutes {
       'SELECT COUNT(*) as c FROM user_profiles WHERE is_coach = 1',
     ).first['c'] as int?) ?? 0;
 
+    final pendingApplications = (db.select(
+      "SELECT COUNT(*) as c FROM coach_applications WHERE status = 'pending'",
+    ).first['c'] as int?) ?? 0;
+
     return jsonResponse({
       'generated_at': DateTime.now().toUtc().toIso8601String(),
       'users': {
@@ -93,7 +99,86 @@ class AdminRoutes {
       },
       'coaches': {
         'total': totalCoaches,
+        'pending_applications': pendingApplications,
       },
+    });
+  }
+
+  // ── Candidatures coach ───────────────────────────────────────────────────
+
+  /// Candidatures (`?status=pending|approved|rejected`, `pending` par défaut),
+  /// avec le profil proposé.
+  Response listCoachApplications(Request request) {
+    final denied = _guard(request, 'GET /admin/coach-applications');
+    if (denied != null) return denied;
+
+    final status = request.url.queryParameters['status'] ?? 'pending';
+    final rows = database.raw.select(
+      'SELECT a.id, a.user_id, a.status, a.created_at, a.decided_at, u.display_name, u.email, '
+      'p.specialities, p.location, p.languages, p.bio, p.is_public '
+      'FROM coach_applications a '
+      'JOIN users u ON u.id = a.user_id '
+      'LEFT JOIN coach_public_profiles p ON p.coach_user_id = a.user_id '
+      'WHERE a.status = ? ORDER BY a.created_at ASC',
+      [status],
+    );
+    final applications = [
+      for (final r in rows)
+        {
+          'id': r['id'],
+          'userId': r['user_id'],
+          'displayName': r['display_name'],
+          'email': r['email'],
+          'status': r['status'],
+          'createdAt': r['created_at'],
+          'decidedAt': r['decided_at'],
+          'specialities': jsonDecode(r['specialities'] as String? ?? '[]'),
+          'location': r['location'],
+          'languages': jsonDecode(r['languages'] as String? ?? '[]'),
+          'bio': r['bio'],
+          'isPublic': (r['is_public'] as int? ?? 0) == 1,
+        },
+    ];
+    return jsonResponse({'applications': applications, 'total': applications.length});
+  }
+
+  /// Valide la candidature : le compte devient coach (visible dans l'app à
+  /// sa prochaine ouverture).
+  Response approveCoachApplication(Request request, String applicationId) =>
+      _decideCoachApplication(request, applicationId, approve: true);
+
+  Response rejectCoachApplication(Request request, String applicationId) =>
+      _decideCoachApplication(request, applicationId, approve: false);
+
+  Response _decideCoachApplication(Request request, String applicationId, {required bool approve}) {
+    final denied = _guard(
+      request,
+      'POST /admin/coach-applications/<id>/${approve ? 'approve' : 'reject'}',
+    );
+    if (denied != null) return denied;
+
+    final rows = database.raw.select(
+      "SELECT user_id FROM coach_applications WHERE id = ? AND status = 'pending' LIMIT 1",
+      [applicationId],
+    );
+    if (rows.isEmpty) return errorResponse('Application not found.', statusCode: 404);
+    final userId = rows.first['user_id'] as String;
+    final now = dbNow();
+
+    database.raw.execute(
+      'UPDATE coach_applications SET status = ?, decided_at = ?, updated_at = ? WHERE id = ?',
+      [approve ? 'approved' : 'rejected', now, now, applicationId],
+    );
+    if (approve) {
+      database.raw.execute(
+        'UPDATE user_profiles SET is_coach = 1, updated_at = ? WHERE user_id = ?',
+        [now, userId],
+      );
+    }
+    return jsonResponse({
+      'applicationId': applicationId,
+      'userId': userId,
+      'status': approve ? 'approved' : 'rejected',
     });
   }
 

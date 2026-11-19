@@ -22,6 +22,8 @@ class AppConfig {
     required this.resendFromEmail,
     required this.workoutXApiKey,
     required this.workoutXBaseUrl,
+    this.adminNotifyEmail = '',
+    this.coachFeatureEnabled = true,
   });
 
   final int port;
@@ -48,6 +50,14 @@ class AppConfig {
   final String resendFromEmail;
   final String workoutXApiKey;
   final String workoutXBaseUrl;
+
+  /// Destinataire des alertes d'administration (nouvelle candidature coach).
+  /// En bac à sable, Resend n'envoie qu'à l'adresse du titulaire du compte.
+  final String adminNotifyEmail;
+
+  /// Onglet Coach affiché par l'app (`GET /config`) : le couper ici le masque
+  /// au démarrage suivant, sans nouvelle version sur les stores.
+  final bool coachFeatureEnabled;
 
   bool get isProduction => env == 'production';
 
@@ -104,6 +114,8 @@ class AppConfig {
       resendFromEmail: get('RESEND_FROM_EMAIL', 'onboarding@resend.dev'),
       workoutXApiKey: get('WORKOUTX_API_KEY', ''),
       workoutXBaseUrl: get('WORKOUTX_BASE_URL', 'https://api.workoutxapp.com/v1'),
+      adminNotifyEmail: get('ADMIN_NOTIFY_EMAIL', ''),
+      coachFeatureEnabled: get('COACH_FEATURE_ENABLED', 'true').toLowerCase() != 'false',
     );
   }
 }

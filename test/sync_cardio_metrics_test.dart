@@ -6,7 +6,7 @@ import 'package:test/test.dart';
 import '../lib/src/app.dart';
 import 'test_config.dart';
 
-/// Distance, durée, vitesse et calories d'une série doivent revenir telles
+/// Distance, durée, vitesse, calories et niveau de la machine d'une série doivent revenir telles
 /// quelles dans le snapshot : sans elles, une séance de cardio ou de gainage
 /// restaurée sur un nouvel appareil revient vide.
 void main() {
@@ -59,6 +59,7 @@ void main() {
                 'effortSeconds': 1500,
                 'speedMs': 3.33,
                 'calories': 350.0,
+                'level': 2.5,
                 'setType': 'normal',
               },
             ],
@@ -99,10 +100,12 @@ void main() {
     expect(run['effortSeconds'], 1500);
     expect(run['speedMs'], 3.33);
     expect(run['calories'], 350.0);
+    expect(run['level'], 2.5);
 
     final plank = sets[1];
     expect(plank['effortSeconds'], 45);
     expect(plank['distanceM'], isNull);
+    expect(plank['level'], isNull);
     expect(plank['volumeReps'], 24);
   }
 

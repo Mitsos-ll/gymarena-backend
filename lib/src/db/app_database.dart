@@ -407,6 +407,9 @@ class AppDatabase {
     _addColumnIfMissing('workout_sets', 'effort_seconds', 'INTEGER');
     _addColumnIfMissing('workout_sets', 'speed_m_per_s', 'REAL');
     _addColumnIfMissing('workout_sets', 'calories', 'REAL');
+    // Réglage de la machine cardio : niveau de résistance, ou inclinaison en %
+    // pour le tapis de course.
+    _addColumnIfMissing('workout_sets', 'level', 'REAL');
 
     // Détail gauche/droite pour les exercices unilatéraux — même besoin que
     // ci-dessus, cette table n'existait pas du tout côté serveur.

@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:shelf/shelf.dart';
 import '../db/app_database.dart';
 import '../middleware/rate_limit_middleware.dart';
 import '../repositories/moderation_repository.dart';
+import '../services/push_service.dart';
 import '../utils/api_exception.dart';
 import '../utils/client_ip.dart';
 import '../utils/http_json.dart';
@@ -16,12 +18,15 @@ class AdminRoutes {
     required this.database,
     required this.adminSecret,
     required RateLimiter adminLimiter,
-  }) : _adminLimiter = adminLimiter;
+    required PushNotifier push,
+  })  : _adminLimiter = adminLimiter,
+        _push = push;
 
   final ModerationRepository moderation;
   final AppDatabase database;
   final String adminSecret;
   final RateLimiter _adminLimiter;
+  final PushNotifier _push;
 
   /// Vérifie le rate-limit dédié puis le secret admin (comparaison à temps
   /// constant), et journalise tout accès autorisé pour audit. Retourne une
@@ -174,6 +179,7 @@ class AdminRoutes {
         'UPDATE user_profiles SET is_coach = 1, updated_at = ? WHERE user_id = ?',
         [now, userId],
       );
+      unawaited(_push.notify(userId, PushEvent.coachApproved));
     }
     return jsonResponse({
       'applicationId': applicationId,

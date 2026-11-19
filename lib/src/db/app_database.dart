@@ -268,6 +268,20 @@ class AppDatabase {
     // l'annuaire ; `speciality` (texte libre) n'est plus saisie.
     _addColumnIfMissing('coach_public_profiles', 'specialities', "TEXT NOT NULL DEFAULT '[]'");
 
+    // Téléphones qui reçoivent les notifications push d'un compte.
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS push_tokens (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        locale TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    ''');
+    _db.execute('CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id);');
+
     // Candidatures « devenir coach », validées par l'administrateur seul.
     _db.execute('''
       CREATE TABLE IF NOT EXISTS coach_applications (

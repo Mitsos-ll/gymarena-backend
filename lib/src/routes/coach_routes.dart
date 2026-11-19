@@ -13,6 +13,7 @@ import '../middleware/rate_limit_middleware.dart';
 import '../repositories/user_repository.dart';
 import '../services/athlete_progress.dart';
 import '../services/email_service.dart';
+import '../services/push_service.dart';
 import '../utils/api_exception.dart';
 import '../utils/auth_helper.dart';
 import '../utils/http_json.dart';
@@ -24,17 +25,30 @@ class CoachRoutes {
     required String photosDir,
     required EmailService emailService,
     required String adminNotifyEmail,
+    required PushNotifier push,
   })  : _repo = userRepository,
         _db = database,
         _photosDir = photosDir,
         _email = emailService,
-        _adminNotifyEmail = adminNotifyEmail;
+        _adminNotifyEmail = adminNotifyEmail,
+        _push = push;
 
   final UserRepository _repo;
   final AppDatabase _db;
   final String _photosDir;
   final EmailService _email;
   final String _adminNotifyEmail;
+  final PushNotifier _push;
+
+  /// Nom affiché d'un coach : celui de son profil public s'il en a un.
+  String _displayNameOf(String userId) {
+    final rows = _db.raw.select(
+      'SELECT COALESCE(cp.display_name, u.display_name) AS name FROM users u '
+      'LEFT JOIN coach_public_profiles cp ON cp.coach_user_id = u.id WHERE u.id=? LIMIT 1',
+      [userId],
+    );
+    return rows.isEmpty ? '' : rows.first['name'] as String? ?? '';
+  }
 
   /// Par compte : codes d'invitation générés et demandes envoyées.
   final _actionLimiter = RateLimiter(maxRequests: 10, windowDuration: const Duration(hours: 1));
@@ -596,6 +610,10 @@ class CoachRoutes {
 
       final now = dbNow();
       final id = _uuid.v4();
+      final previous = _db.raw.select(
+        'SELECT note_text FROM coach_workout_notes WHERE coach_user_id=? AND workout_id=? LIMIT 1',
+        [coachUserId, workoutId],
+      );
 
       _db.raw.execute(
         'INSERT OR REPLACE INTO coach_workout_notes (id, coach_user_id, athlete_user_id, workout_id, note_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -603,6 +621,17 @@ class CoachRoutes {
       );
       // Écrire une note, c'est avoir vu la séance.
       _markSeen(coachUserId, athleteUserId, workoutId, now);
+
+      // Une note réenregistrée telle quelle ne renotifie pas l'athlète.
+      if (previous.isEmpty || previous.first['note_text'] != noteText) {
+        final localId = _db.raw.select('SELECT local_id FROM workouts WHERE id=?', [workoutId]).first['local_id'];
+        unawaited(_push.notify(
+          athleteUserId,
+          PushEvent.coachNote,
+          args: {'coach': _displayNameOf(coachUserId), 'note': PushNotifier.clip(noteText)},
+          data: {if (localId != null) 'workoutLocalId': '$localId'},
+        ));
+      }
 
       return jsonResponse({
         'id': id,
@@ -705,6 +734,11 @@ class CoachRoutes {
           now,
         ],
       );
+      unawaited(_push.notify(
+        athleteUserId,
+        PushEvent.programAssigned,
+        args: {'coach': _displayNameOf(coachUserId), 'program': name},
+      ));
 
       return jsonResponse({
         'id': id,
@@ -1063,6 +1097,7 @@ Invoke-RestMethod -Method Post -Uri "https://gymtrack-backend-2.fly.dev/admin/co
         "SELECT * FROM coach_invite_requests WHERE coach_user_id=? AND athlete_user_id=? AND status='pending' LIMIT 1",
         [coachUserId, athleteUserId],
       );
+      unawaited(_push.notify(coachUserId, PushEvent.inviteRequest, args: {'athlete': athleteDisplayName}));
 
       return jsonResponse(_requestRowToJson(rows.first));
     } on ApiException catch (e) {
@@ -1113,6 +1148,7 @@ Invoke-RestMethod -Method Post -Uri "https://gymtrack-backend-2.fly.dev/admin/co
         'INSERT OR REPLACE INTO coach_athlete_links (id, coach_user_id, athlete_user_id, status, linked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
         [linkId, coachUserId, athleteUserId, 'active', now, now],
       );
+      unawaited(_push.notify(athleteUserId, PushEvent.inviteAccepted, args: {'coach': _displayNameOf(coachUserId)}));
 
       return jsonResponse({
         'link': {

@@ -24,6 +24,7 @@ class AppConfig {
     required this.workoutXBaseUrl,
     this.adminNotifyEmail = '',
     this.coachFeatureEnabled = true,
+    this.firebaseServiceAccount = '',
   });
 
   final int port;
@@ -58,6 +59,10 @@ class AppConfig {
   /// Onglet Coach affiché par l'app (`GET /config`) : le couper ici le masque
   /// au démarrage suivant, sans nouvelle version sur les stores.
   final bool coachFeatureEnabled;
+
+  /// Compte de service Firebase (JSON en base64) pour les notifications
+  /// push ; vide : notifications désactivées.
+  final String firebaseServiceAccount;
 
   bool get isProduction => env == 'production';
 
@@ -116,6 +121,7 @@ class AppConfig {
       workoutXBaseUrl: get('WORKOUTX_BASE_URL', 'https://api.workoutxapp.com/v1'),
       adminNotifyEmail: get('ADMIN_NOTIFY_EMAIL', ''),
       coachFeatureEnabled: get('COACH_FEATURE_ENABLED', 'true').toLowerCase() != 'false',
+      firebaseServiceAccount: get('FIREBASE_SERVICE_ACCOUNT_B64', ''),
     );
   }
 }

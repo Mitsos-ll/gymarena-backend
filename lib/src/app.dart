@@ -21,12 +21,14 @@ import 'routes/exercise_catalog_routes.dart';
 import 'routes/invite_routes.dart';
 import 'routes/me_routes.dart';
 import 'routes/moderation_routes.dart';
+import 'routes/push_routes.dart';
 import 'routes/sync_routes.dart';
 import 'services/apple_rest_service.dart';
 import 'services/apple_token_service.dart';
 import 'services/email_service.dart';
 import 'services/gif_cache_service.dart';
 import 'services/google_token_service.dart';
+import 'services/push_service.dart';
 import 'services/session_service.dart';
 import 'services/workoutx_service.dart';
 import 'utils/http_json.dart';
@@ -40,6 +42,7 @@ class GymTrackBackend {
     AppleTokenService? appleTokenService,
     AppleRestService? appleRestService,
     EmailService? emailService,
+    PushSender? pushSender,
   })
       : database = AppDatabase.open(config.databasePath),
         sessionService = SessionService(
@@ -85,6 +88,11 @@ class GymTrackBackend {
       sessionService: sessionService,
     );
     moderationRepository = ModerationRepository(database: database);
+    pushNotifier = PushNotifier(
+      database: database,
+      sender: pushSender ?? FcmPushSender.fromServiceAccount(config.firebaseServiceAccount),
+    );
+    pushRoutes = PushRoutes(userRepository: userRepository, database: database);
     authRoutes = AuthRoutes(
       googleTokenService: googleTokenService,
       appleTokenService: this.appleTokenService,
@@ -106,6 +114,7 @@ class GymTrackBackend {
       database: database,
       adminSecret: config.adminSecret,
       adminLimiter: _adminLimiter,
+      push: pushNotifier,
     );
     coachRoutes = CoachRoutes(
       userRepository: userRepository,
@@ -113,6 +122,7 @@ class GymTrackBackend {
       photosDir: p.join(p.dirname(config.databasePath), 'coach_photos'),
       emailService: this.emailService,
       adminNotifyEmail: config.adminNotifyEmail,
+      push: pushNotifier,
     );
     inviteRoutes = InviteRoutes(
       userRepository: userRepository,
@@ -206,6 +216,8 @@ class GymTrackBackend {
   late final MeRoutes meRoutes;
   late final AdminRoutes adminRoutes;
   late final CoachRoutes coachRoutes;
+  late final PushNotifier pushNotifier;
+  late final PushRoutes pushRoutes;
   late final InviteRoutes inviteRoutes;
   late final SyncRoutes syncRoutes;
   late final ExerciseCatalogRepository exerciseCatalogRepository;
@@ -234,6 +246,8 @@ class GymTrackBackend {
     router.put('/me/profile', meRoutes.upsertProfile);
     router.put('/me/fitness-goal', meRoutes.updateFitnessGoal);
     router.delete('/me', meRoutes.deleteAccount);
+    router.put('/me/push-tokens', pushRoutes.registerToken);
+    router.delete('/me/push-tokens', pushRoutes.unregisterToken);
 
     // ── Modération : signaler / bloquer (App Store, guideline 1.2) ──────────
     router.get('/community/blocks', moderationRoutes.listBlocked);

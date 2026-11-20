@@ -1080,8 +1080,10 @@ Invoke-RestMethod -Method Post -Uri "https://gymtrack-backend-2.fly.dev/admin/co
       final filename = '$coachUserId.jpg';
       File(p.join(dir.path, filename)).writeAsBytesSync(bytes);
 
-      final photoUrl = '/coach-photos/$filename';
       final now = dbNow();
+      // Même fichier à chaque envoi : l'adresse change avec la version, sinon
+      // l'app garderait l'ancienne image en cache.
+      final photoUrl = '/coach-photos/$filename?v=${DateTime.now().millisecondsSinceEpoch}';
 
       _db.raw.execute(
         'INSERT INTO coach_public_profiles (coach_user_id, display_name, languages, is_public, photo_url, created_at, updated_at) '
@@ -1096,6 +1098,30 @@ Invoke-RestMethod -Method Post -Uri "https://gymtrack-backend-2.fly.dev/admin/co
       );
 
       return jsonResponse(_profileRowToJson(rows.first));
+    } on ApiException catch (e) {
+      return errorResponse(e.message, statusCode: e.statusCode);
+    }
+  }
+
+  /// Retire la photo du profil public (fichier compris).
+  Future<Response> deleteProfilePhoto(Request request) async {
+    try {
+      final session = requireAuth(request, _repo);
+      requireCoach(session);
+      final coachUserId = session.user.id;
+
+      final file = File(p.join(_photosDir, '$coachUserId.jpg'));
+      if (file.existsSync()) file.deleteSync();
+      _db.raw.execute(
+        'UPDATE coach_public_profiles SET photo_url = NULL, updated_at = ? WHERE coach_user_id = ?',
+        [dbNow(), coachUserId],
+      );
+
+      final rows = _db.raw.select(
+        'SELECT * FROM coach_public_profiles WHERE coach_user_id=? LIMIT 1',
+        [coachUserId],
+      );
+      return jsonResponse({'profile': rows.isEmpty ? null : _profileRowToJson(rows.first)});
     } on ApiException catch (e) {
       return errorResponse(e.message, statusCode: e.statusCode);
     }

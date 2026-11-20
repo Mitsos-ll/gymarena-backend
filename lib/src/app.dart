@@ -295,6 +295,7 @@ class GymTrackBackend {
     router.put('/coach/public-profile', coachRoutes.upsertPublicProfile);
     router.get('/coach/public-profile', coachRoutes.getMyPublicProfile);
     router.put('/coach/public-profile/photo', coachRoutes.uploadProfilePhoto);
+    router.delete('/coach/public-profile/photo', coachRoutes.deleteProfilePhoto);
     router.get('/coach-photos/<filename>', coachRoutes.servePhoto);
     router.get('/coaches/public', coachRoutes.getPublicCoaches);
     router.get('/athlete/coach', coachRoutes.getMyCoach);

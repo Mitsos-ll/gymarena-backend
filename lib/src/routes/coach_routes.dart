@@ -72,6 +72,18 @@ class CoachRoutes {
     'running',
   };
 
+  /// Libellés des spécialités pour le mail de l'administrateur (mêmes que
+  /// ceux de l'app en français).
+  static const _specialityLabelsFr = {
+    'strength': 'Musculation',
+    'powerlifting': 'Powerlifting',
+    'hyrox_crossfit': 'Hyrox / CrossFit',
+    'weight_loss': 'Perte de poids',
+    'fitness': 'Remise en forme',
+    'athletic_prep': 'Préparation physique',
+    'running': 'Course à pied',
+  };
+
   void _throttle(RateLimiter limiter, String key) {
     if (!limiter.allow(key)) {
       throw ApiException('Too many requests. Please slow down.', statusCode: 429);
@@ -886,6 +898,7 @@ class CoachRoutes {
           displayName: displayName,
           email: session.user.email,
           profile: profile,
+          account: _applicantAccount(userId),
         ),
       ));
 
@@ -921,24 +934,76 @@ class CoachRoutes {
         'decidedAt': row['decided_at'],
       };
 
+  /// Ce que le compte du candidat a déjà fait dans l'app, pour juger de son
+  /// sérieux : ancienneté, mode de connexion, séances enregistrées.
+  Map<String, Object?> _applicantAccount(String userId) {
+    final row = _db.raw.select(
+      'SELECT u.created_at, '
+      '(SELECT GROUP_CONCAT(DISTINCT provider) FROM user_auth_accounts WHERE user_id = u.id) AS providers, '
+      '(SELECT COUNT(*) FROM workouts WHERE user_id = u.id) AS workouts, '
+      '(SELECT MAX(workout_date) FROM workouts WHERE user_id = u.id) AS last_workout '
+      'FROM users u WHERE u.id = ?',
+      [userId],
+    ).first;
+    return {
+      'createdAt': row['created_at'],
+      'providers': row['providers'],
+      'workouts': row['workouts'],
+      'lastWorkout': row['last_workout'],
+    };
+  }
+
   String _applicationEmailHtml({
     required String applicationId,
     required String displayName,
     required String email,
     required Map<String, dynamic> profile,
+    required Map<String, Object?> account,
   }) {
-    String esc(Object? value) => const HtmlEscape().convert(value?.toString() ?? '—');
-    final specialitiesText = (profile['specialities'] as List).join(', ');
+    String esc(Object? value) {
+      final text = value?.toString().trim() ?? '';
+      return const HtmlEscape().convert(text.isEmpty ? '—' : text);
+    }
+
+    String day(Object? iso) => iso == null ? '—' : iso.toString().substring(0, 10);
+    String row(String label, String value) =>
+        '<tr><td style="color:#6B7280;padding-right:12px;vertical-align:top;">$label</td><td>$value</td></tr>';
+
+    final specialitiesText = [
+      for (final key in profile['specialities'] as List) _specialityLabelsFr[key] ?? key,
+    ].join(', ');
     final languagesText = (profile['languages'] as List).join(', ');
+    final providersText = (account['providers'] as String? ?? '')
+        .split(',')
+        .where((p) => p.isNotEmpty)
+        .map((p) => switch (p) {
+              'gymtrack' => 'email + mot de passe',
+              'google' => 'Google',
+              'apple' => 'Apple',
+              _ => p,
+            })
+        .join(', ');
     return '''
 <div style="font-family:-apple-system,Roboto,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111827;">
   <h2>Nouvelle candidature coach</h2>
   <p><b>${esc(displayName)}</b> (${esc(email)}) propose son profil de coach.</p>
+  <h3 style="margin-bottom:4px;">Profil coach saisi</h3>
   <table style="font-size:14px;line-height:1.6;">
-    <tr><td style="color:#6B7280;padding-right:12px;">Spécialités</td><td>${esc(specialitiesText.isEmpty ? null : specialitiesText)}</td></tr>
-    <tr><td style="color:#6B7280;padding-right:12px;">Ville</td><td>${esc(profile['location'])}</td></tr>
-    <tr><td style="color:#6B7280;padding-right:12px;">Langues</td><td>${esc(languagesText.isEmpty ? null : languagesText)}</td></tr>
-    <tr><td style="color:#6B7280;padding-right:12px;">Présentation</td><td>${esc(profile['bio'])}</td></tr>
+    ${row('Nom affiché', esc(profile['displayName']))}
+    ${row('Spécialités', esc(specialitiesText))}
+    ${row('Ville', esc(profile['location']))}
+    ${row('Langues', esc(languagesText))}
+    ${row('Présentation', esc(profile['bio']).replaceAll('\n', '<br>'))}
+    ${row('WhatsApp', esc(profile['whatsapp']))}
+    ${row('Instagram', esc(profile['instagram']))}
+    ${row("Visible dans l'annuaire", profile['isPublic'] == true ? 'Oui' : 'Non')}
+  </table>
+  <h3 style="margin-bottom:4px;">Compte</h3>
+  <table style="font-size:14px;line-height:1.6;">
+    ${row('Inscrit le', day(account['createdAt']))}
+    ${row('Connexion', esc(providersText))}
+    ${row('Séances enregistrées', '${account['workouts'] ?? 0}')}
+    ${row('Dernière séance', day(account['lastWorkout']))}
   </table>
   <p style="margin-top:20px;">Pour décider, dans PowerShell (secret admin dans <code>\$env:GYMARENA_ADMIN_SECRET</code>) :</p>
   <pre style="background:#F3F4F6;padding:12px;border-radius:8px;font-size:12px;white-space:pre-wrap;">Invoke-RestMethod -Method Post -Uri "https://gymtrack-backend-2.fly.dev/admin/coach-applications/$applicationId/approve" -Headers @{ Authorization = "Bearer \$env:GYMARENA_ADMIN_SECRET" }

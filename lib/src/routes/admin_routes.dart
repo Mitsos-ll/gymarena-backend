@@ -63,11 +63,11 @@ class AdminRoutes {
     ).first['c'] as int?) ?? 0;
 
     final activeUsers7d = (db.select(
-      "SELECT COUNT(*) as c FROM users WHERE is_deleted = 0 AND last_login_at >= datetime('now', '-7 days')",
+      "SELECT COUNT(*) as c FROM users WHERE is_deleted = 0 AND datetime(COALESCE(last_seen_at, last_login_at)) >= datetime('now', '-7 days')",
     ).first['c'] as int?) ?? 0;
 
     final activeUsers30d = (db.select(
-      "SELECT COUNT(*) as c FROM users WHERE is_deleted = 0 AND last_login_at >= datetime('now', '-30 days')",
+      "SELECT COUNT(*) as c FROM users WHERE is_deleted = 0 AND datetime(COALESCE(last_seen_at, last_login_at)) >= datetime('now', '-30 days')",
     ).first['c'] as int?) ?? 0;
 
     final newToday = (db.select(
@@ -120,7 +120,10 @@ class AdminRoutes {
     final status = request.url.queryParameters['status'] ?? 'pending';
     final rows = database.raw.select(
       'SELECT a.id, a.user_id, a.status, a.created_at, a.decided_at, u.display_name, u.email, '
-      'p.specialities, p.location, p.languages, p.bio, p.is_public '
+      'p.specialities, p.location, p.languages, p.bio, p.is_public, p.whatsapp, p.instagram, '
+      'u.created_at AS user_created_at, '
+      '(SELECT GROUP_CONCAT(DISTINCT provider) FROM user_auth_accounts WHERE user_id = a.user_id) AS providers, '
+      '(SELECT COUNT(*) FROM workouts WHERE user_id = a.user_id) AS workouts '
       'FROM coach_applications a '
       'JOIN users u ON u.id = a.user_id '
       'LEFT JOIN coach_public_profiles p ON p.coach_user_id = a.user_id '
@@ -142,6 +145,11 @@ class AdminRoutes {
           'languages': jsonDecode(r['languages'] as String? ?? '[]'),
           'bio': r['bio'],
           'isPublic': (r['is_public'] as int? ?? 0) == 1,
+          'whatsapp': r['whatsapp'],
+          'instagram': r['instagram'],
+          'accountCreatedAt': r['user_created_at'],
+          'providers': (r['providers'] as String? ?? '').split(',').where((p) => p.isNotEmpty).toList(),
+          'workouts': r['workouts'],
         },
     ];
     return jsonResponse({'applications': applications, 'total': applications.length});

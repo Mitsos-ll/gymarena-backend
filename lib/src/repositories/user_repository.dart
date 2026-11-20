@@ -323,6 +323,7 @@ class UserRepository {
     final userId = sessionRow['user_id'] as String;
     final user = _getUserById(userId);
     if (user == null) throw ApiException('User not found.', statusCode: 404);
+    _touchLastSeen(userId);
 
     return ApiSession(
       accessToken: accessToken,
@@ -535,7 +536,17 @@ class UserRepository {
     );
   }
 
+  /// Dernière activité du compte, au plus une écriture par heure.
+  void _touchLastSeen(String userId) {
+    final now = DateTime.now().toUtc();
+    _database.raw.execute(
+      'UPDATE users SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)',
+      [now.toIso8601String(), userId, now.subtract(const Duration(hours: 1)).toIso8601String()],
+    );
+  }
+
   ApiSession _createSessionForUser(ApiUser user, ApiProfile? profile) {
+    _touchLastSeen(user.id);
     final now = dbNow();
     final tokens = _sessionService.issueTokens();
     _insertSession(userId: user.id, tokens: tokens, now: now);

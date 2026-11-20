@@ -79,6 +79,8 @@ void main() {
         'location': 'Lyon',
         'languages': ['Français', 'English'],
         'isPublic': true,
+        'whatsapp': '+33 6 12 34 56 78',
+        'instagram': '@karim.coach',
       };
 
   setUp(() async {
@@ -109,14 +111,27 @@ void main() {
     expect(mail['to'], ['admin@example.com']);
     expect(mail['subject'], contains('Karim'));
     expect(mail['html'], contains('/admin/coach-applications/${submitted['id']}/approve'));
-    expect(mail['html'], contains('running, strength'));
+    // Tout ce que le candidat a saisi, et son compte, pour vérifier avant
+    // de décider.
+    final html = mail['html'] as String;
+    expect(html, contains('Course à pied, Musculation'));
+    expect(html, contains('Lyon'));
+    expect(html, contains('Coach de force'));
+    expect(html, contains('+33 6 12 34 56 78'));
+    expect(html, contains('@karim.coach'));
+    expect(html, contains('email + mot de passe'));
+    expect(html, contains('Séances enregistrées</td><td>0'));
 
     expect((await send('POST', '/coach/application', token: karim.token, body: profile())).statusCode, 409);
     expect((await json(await send('GET', '/coaches/public', token: karim.token)))['coaches'], isEmpty);
     expect((await json(await admin('GET', '/admin/stats')))['coaches']['pending_applications'], 1);
 
     final pending = await json(await admin('GET', '/admin/coach-applications'));
-    expect((pending['applications'] as List).single['email'], 'karim@example.com');
+    final application = (pending['applications'] as List).single as Map<String, dynamic>;
+    expect(application['email'], 'karim@example.com');
+    expect(application['instagram'], '@karim.coach');
+    expect(application['providers'], ['gymtrack']);
+    expect(application['workouts'], 0);
 
     await json(await admin('POST', '/admin/coach-applications/${submitted['id']}/approve'));
     final me = await json(await send('GET', '/me', token: karim.token));
@@ -241,5 +256,28 @@ void main() {
 
   test("l'app lit le réglage du coaching sans compte", () async {
     expect(await json(await send('GET', '/config')), {'coachEnabled': true});
+  });
+
+  test("dernière activité : comptée à l'ouverture de l'app, sans nouvelle connexion", () async {
+    final lea = await register('Lea');
+    final db = backend.database.raw;
+    db.execute(
+      "UPDATE users SET last_login_at = '2026-01-01T00:00:00.000Z', last_seen_at = '2026-01-01T00:00:00.000Z' WHERE id = ?",
+      [lea.id],
+    );
+    Future<int> active7d() async => (await json(await admin('GET', '/admin/stats')))['users']['active_7d'] as int;
+    expect(await active7d(), 0);
+
+    // Session restaurée au lancement : GET /me, pas de connexion.
+    await json(await send('GET', '/me', token: lea.token));
+    expect(await active7d(), 1);
+    Map<String, Object?> dates() =>
+        db.select('SELECT last_login_at, last_seen_at FROM users WHERE id = ?', [lea.id]).first;
+    final seen = dates()['last_seen_at'];
+    expect(dates()['last_login_at'], '2026-01-01T00:00:00.000Z');
+
+    // Au plus une écriture par heure.
+    await json(await send('GET', '/me', token: lea.token));
+    expect(dates()['last_seen_at'], seen);
   });
 }

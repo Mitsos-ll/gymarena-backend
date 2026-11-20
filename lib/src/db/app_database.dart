@@ -124,6 +124,10 @@ class AppDatabase {
 
     // ── display_name_normalized sur users (unicité du pseudo) ───────────────
     _addColumnIfMissing('users', 'display_name_normalized', 'TEXT');
+    // Dernière activité (requête authentifiée, au plus une écriture par
+    // heure) : last_login_at ne bouge qu'aux vraies connexions, pas quand
+    // l'app restaure sa session.
+    _addColumnIfMissing('users', 'last_seen_at', 'TEXT');
 
     // ── Coach ───────────────────────────────────────────────────────────────
     _db.execute('''
